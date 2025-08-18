@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install pnpm
+        run: corepack enable && corepack prepare pnpm@latest --activate
+      - name: Install & build server
+        working-directory: ./server
+        run: |
+          pnpm install
+          pnpm run build
+      - name: Install & build web
+        working-directory: ./web
+        run: |
+          pnpm install
+          pnpm run build

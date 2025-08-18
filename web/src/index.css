@@ -1,0 +1,35 @@
+@import './styles/theme.css';
+/* Smooth theme transitions */
+html {
+  color-scheme: light dark;
+}
+html, body {
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Reusable buttons (optional if you prefer only utilities) */
+.btn {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+.btn-primary {
+  background-color: #2563eb; /* blue-600 */
+  border-color: #2563eb;
+  color: #fff;
+}
+.btn-primary:hover {
+  background-color: #1d4ed8; /* blue-700 */
+  border-color: #1d4ed8;
+}
+.btn-muted {
+  background-color: #e5e7eb; /* gray-200 */
+  border-color: #e5e7eb;
+  color: #111827;             /* gray-900 */
+}
+.btn-muted:hover {
+  background-color: #d1d5db; /* gray-300 */
+  border-color: #d1d5db;
+}

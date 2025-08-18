@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+dist
+server/dist
+web/dist
+.env
+.env.*
+Dockerfile
+.dockerignore
+.vscode
+.idea
+*.log

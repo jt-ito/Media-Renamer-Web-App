@@ -1,0 +1,17 @@
+# Node
+node_modules/
+**/node_modules/
+dist/
+web/dist/
+server/dist/
+.env
+.env.*
+.DS_Store
+.vscode/
+.idea/
+*.log
+.pnpm-debug.log
+
+# OS
+Thumbs.db
+desktop.ini

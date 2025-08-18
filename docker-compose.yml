@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  app:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      - PORT=8787
+      - STATIC_ROOT=/app/web/dist
+    volumes:
+      - ./web/dist:/app/web/dist:ro
+    restart: unless-stopped
