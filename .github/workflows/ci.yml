@@ -10,21 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Debug: show repo state
-        run: |
-          echo "Current commit: $(git rev-parse --verify HEAD)"
-          echo "--- server directory listing ---"
-          ls -la server || true
-          echo "--- server/package.json (first 200 lines) ---"
-          sed -n '1,200p' server/package.json || true
-          echo "--- server/pnpm-lock.yaml (first 120 lines) ---"
-          sed -n '1,120p' server/pnpm-lock.yaml || true
-          echo "--- web directory listing ---"
-          ls -la web || true
-          echo "--- web/package.json (first 200 lines) ---"
-          sed -n '1,200p' web/package.json || true
-          echo "--- web/pnpm-lock.yaml (first 120 lines) ---"
-          sed -n '1,120p' web/pnpm-lock.yaml || true
+      - name: Debug: show current commit
+        run: git rev-parse --verify HEAD
+      - name: Debug: list server directory
+        run: ls -la server || true
+      - name: Debug: show server package.json first lines
+        run: sed -n '1,200p' server/package.json || true
+      - name: Debug: show server pnpm-lock.yaml head
+        run: sed -n '1,120p' server/pnpm-lock.yaml || true
+      - name: Debug: list web directory
+        run: ls -la web || true
+      - name: Debug: show web package.json first lines
+        run: sed -n '1,200p' web/package.json || true
+      - name: Debug: show web pnpm-lock.yaml head
+        run: sed -n '1,120p' web/pnpm-lock.yaml || true
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
