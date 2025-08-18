@@ -95,6 +95,38 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 name: CI
+
+on:
+  push: {}
+  pull_request: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable corepack and pnpm
+        run: corepack enable && corepack prepare pnpm@latest --activate
+
+      - name: Install & build server
+        working-directory: server
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Install & build web
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+name: CI
 name: CI
 
 on:
