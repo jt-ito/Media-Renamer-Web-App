@@ -1,34 +1,41 @@
 # Multi-stage Dockerfile for media-renamer
-# Builds web (Vite) and server (TypeScript) and produces a lightweight runtime image
+# Uses Debian-slim image to improve compatibility with native modules and build tools.
+
+# -- Base image with build tools available
+FROM node:20-bullseye-slim AS base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl build-essential python3 make g++ git && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+ENV NODE_ENV=production
+
+# Enable corepack and prepare pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # -- Build web assets
-FROM node:20-alpine AS web-builder
+FROM base AS web-builder
 WORKDIR /app/web
-ENV NODE_ENV=production
-# Enable corepack/pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY web/package.json web/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false
 COPY web/ ./
 RUN pnpm run build
 
 # -- Build server
-FROM node:20-alpine AS server-builder
+FROM base AS server-builder
 WORKDIR /app/server
-ENV NODE_ENV=production
-RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY server/package.json server/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false
 COPY server/ ./
 RUN pnpm run build
 
-# -- Final runtime image
-FROM node:20-alpine AS runtime
+# -- Final runtime image (slim)
+FROM node:20-bullseye-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8787
 ENV STATIC_ROOT=/app/web/dist
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@latest --activate || true
 
 # Copy server runtime (compiled) and production deps
 COPY --from=server-builder /app/server/dist ./dist
@@ -38,12 +45,12 @@ COPY --from=server-builder /app/server/package.json ./package.json
 # Copy built web assets
 COPY --from=web-builder /app/web/dist ./web/dist
 
-# Optional env example
-COPY .env.example ./
+# Optional env example if present
+COPY .env.example ./  
 
 EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:8787/health || exit 1
+  CMD curl -f http://127.0.0.1:8787/health || exit 1
 
 CMD ["node", "dist/server.js"]

@@ -34,30 +34,6 @@ pnpm run dev
 
 The web UI runs at http://localhost:5173 by default. The server listens on the configured port (see `server/src/settings.ts`).
 
-## Plug-and-play (one-step)
-If you just want the easiest possible way to run the project (without manually installing dependencies), use one of the bundled convenience scripts in the `release/` folder:
-
-- Unix / Linux / macOS: `release/install-and-run.sh` — will prefer any prebuilt server, otherwise try to install Node/pnpm, build, and run the server. If required tools are missing it will try to fall back to Docker.
-- Windows PowerShell: `release/install-and-run.ps1` — similar behavior on Windows; it will try corepack/npm to provide `pnpm` or fall back to building and running the included Docker image.
-
-These scripts are intentionally conservative and try to work on clean systems. They will:
-- Use any prebuilt `server/dist/server.js` if present (fast start).
-- Attempt to enable `corepack` and `pnpm` if Node is installed.
-- Try to auto-install Node+pnpm on common Linux/Windows package managers when available.
-- As a last resort, build and run the included `Dockerfile` when Docker is available.
-
-Running example (PowerShell):
-
-```powershell
-.\release\install-and-run.ps1
-```
-
-Or in a POSIX shell:
-
-```sh
-sh release/install-and-run.sh
-```
-
 ## Production build
 Build both packages locally:
 

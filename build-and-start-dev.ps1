@@ -28,10 +28,23 @@ try {
 }
 
 # Build the web client
-& "$env:APPDATA\npm\pnpm.cmd" -C web run build
+function Find-Pnpm {
+	if (Get-Command pnpm -ErrorAction SilentlyContinue) { return (Get-Command pnpm).Source }
+	if (Get-Command corepack -ErrorAction SilentlyContinue) {
+		try { corepack enable; corepack prepare pnpm@latest --activate; return (Get-Command pnpm).Source } catch { }
+	}
+	$npmGlobal = Join-Path $env:APPDATA 'npm\pnpm.cmd'
+	if (Test-Path $npmGlobal) { return $npmGlobal }
+	throw "pnpm not found. Install pnpm or enable corepack."
+}
+
+$pnpm = Find-Pnpm
+
+# Build the web client
+& $pnpm -C web run build
 
 # Build the server
-& "$env:APPDATA\npm\pnpm.cmd" -C server run build
+& $pnpm -C server run build
 
 # Start the server (live-reload using nodemon)
-& "$env:APPDATA\npm\pnpm.cmd" -C server run dev:reload
+& $pnpm -C server run dev:reload
