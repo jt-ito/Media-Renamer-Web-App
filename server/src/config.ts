@@ -38,6 +38,13 @@ export function loadLibraries(): Library[] {
       if (unc && process.platform !== 'win32') {
         candidates.push(s.replace(/^\/+/, '/'));
       }
+      // If the path looks like a Linux host mount under /mnt (e.g. /mnt/sda1/Path),
+      // also try mapping it to /media/<rest> which is a common container mount point.
+      const mntMatch = s.match(/^\/mnt\/([^\/]+)\/(.*)$/);
+      if (mntMatch && process.platform !== 'win32') {
+        const rest = mntMatch[2] || '';
+        candidates.push(`/media/${rest}`);
+      }
 
   for (const c of candidates) {
         try {
