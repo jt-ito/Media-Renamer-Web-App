@@ -16,9 +16,7 @@ import { Library, MediaType, RenamePlan, ScanItem } from './types.js';
 import { planEpisode, planMovie, applyPlans } from './renamer.js';
 import { initApproved, isApproved, markApproved, approvedList, unapproveLast } from './approved.js';
 import { loadSettings, saveSettings } from './settings.js';
-import util from 'util';
-import { exec as _exec } from 'child_process';
-const exec = util.promisify(_exec);
+// ...existing imports...
 
 // ESM-safe __dirname/__filename
 const __filename = fileURLToPath(import.meta.url);
@@ -237,63 +235,7 @@ async function bootstrap() {
     }
   });
 
-  // Build a docker-compose override from current libraries and optionally
-  // apply it by running docker compose if the host socket is available.
-  function buildOverrideFromLibs(libs: Library[]) {
-    // Only include absolute, non-empty inputRoot entries
-    const vols: string[] = [];
-    for (const l of libs) {
-      const inr = l.inputRoot;
-      if (!inr) continue;
-      // normalize to absolute container visible path
-      const key = String(inr).trim();
-      if (!key) continue;
-      // mount host path at same container path
-      vols.push(`      - ${key}:${key}:rw`);
-    }
-    if (!vols.length) return null;
-    const content = ['services:', '  media-renamer:', '    volumes:'];
-    content.push(...vols);
-    return content.join('\n') + '\n';
-  }
-
-  app.post('/api/apply-mounts', async (req, reply) => {
-    try {
-      const libs = loadLibraries();
-      const override = buildOverrideFromLibs(libs);
-      if (!override) return reply.status(400).send({ error: 'No library inputRoot entries found' });
-      // Write to container config dir
-      const outPath = '/app/config/docker-compose.override.generated.yml';
-      fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      fs.writeFileSync(outPath, override, 'utf8');
-      log('info', `Wrote docker-compose override to ${outPath}`);
-
-      // Only attempt to run docker if the socket exists and MR_COMPOSE_BASE is set
-      const sock = '/var/run/docker.sock';
-      const base = process.env.MR_COMPOSE_BASE || '';
-      const envFile = process.env.MR_COMPOSE_ENV_FILE || '';
-      if (fs.existsSync(sock) && base) {
-        try {
-          // Build the compose command
-          const envArg = envFile ? `--env-file ${envFile}` : '';
-          const cmd = `docker compose -f ${base} ${envArg} -f ${outPath} up -d --no-deps --force-recreate --remove-orphans media-renamer`;
-          log('info', `Attempting to run: ${cmd}`);
-          const { stdout, stderr } = await exec(cmd);
-          log('debug', `docker-compose stdout: ${stdout}`);
-          if (stderr) log('debug', `docker-compose stderr: ${stderr}`);
-          return reply.send({ ok: true, applied: true, path: outPath, stdout });
-        } catch (e: any) {
-          log('error', `Failed to run docker compose: ${e?.message ?? String(e)}`);
-          return reply.status(500).send({ ok: false, error: 'Failed to run docker compose', detail: String(e) });
-        }
-      }
-
-      return reply.send({ ok: true, applied: false, path: outPath, note: 'Override written but compose not run (no socket or MR_COMPOSE_BASE unset).' });
-    } catch (e: any) {
-      log('error', `apply-mounts failed: ${e?.message ?? String(e)}`);
-      return reply.status(500).send({ error: 'apply-mounts failed' });
-    }
-  });
+  // ...no apply-mounts endpoint (host-only override approach preferred)
 
   app.get('/api/approved', async () => approvedList());
 
