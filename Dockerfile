@@ -11,21 +11,33 @@ ENV NODE_ENV=production
 
 # Enable corepack and prepare pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
+ 
+# Allow building directly from upstream repo when no local context is provided
+ARG REPO_URL=https://github.com/jt-ito/Media-Renamer-Web-App.git
+ARG REPO_REF=HEAD
+# Clone repository into image so subsequent stages can copy sources even when
+# the build context doesn't contain the project files (useful for CI or for
+# running 'docker compose' without checking out the repo locally).
+RUN git clone --depth 1 --branch ${REPO_REF} ${REPO_URL} /src || true
 
 # -- Build web assets
 FROM base AS web-builder
 WORKDIR /app/web
-COPY web/package.json web/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false
-COPY web/ ./
+/* Copy web sources from cloned repo inside base (supports builds without host repo) */
+COPY --from=base /src/web/package.json ./
+COPY --from=base /src/web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false || pnpm install
+COPY --from=base /src/web/ ./
 RUN pnpm run build
 
 # -- Build server
 FROM base AS server-builder
 WORKDIR /app/server
-COPY server/package.json server/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false
-COPY server/ ./
+/* Copy server sources from cloned repo inside base (supports builds without host repo) */
+COPY --from=base /src/server/package.json ./
+COPY --from=base /src/server/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false || pnpm install
+COPY --from=base /src/server/ ./
 RUN pnpm run build
 
 # -- Final runtime image (slim)
@@ -45,8 +57,6 @@ COPY --from=server-builder /app/server/package.json ./package.json
 # Copy built web assets
 COPY --from=web-builder /app/web/dist ./web/dist
 
-# Optional env example if present
-COPY .env.example ./  
 
 EXPOSE 8787
 
