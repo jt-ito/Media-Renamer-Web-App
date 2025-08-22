@@ -16,14 +16,15 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 ARG REPO_URL=https://github.com/jt-ito/Media-Renamer-Web-App.git
 ARG REPO_REF=HEAD
 # Clone repository into image so subsequent stages can copy sources even when
-# the build context doesn't contain the project files (useful for CI or for
-# running 'docker compose' without checking out the repo locally).
-RUN git clone --depth 1 --branch ${REPO_REF} ${REPO_URL} /src || true
+# the build context doesn't contain the project files. Try cloning the
+# requested ref first, fall back to a default shallow clone if that fails.
+RUN set -eux; \
+  git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /src 2>/dev/null || git clone --depth 1 "${REPO_URL}" /src
 
 # -- Build web assets
 FROM base AS web-builder
 WORKDIR /app/web
-/* Copy web sources from cloned repo inside base (supports builds without host repo) */
+# Copy web sources from cloned repo inside base (supports builds without host repo)
 COPY --from=base /src/web/package.json ./
 COPY --from=base /src/web/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false || pnpm install
@@ -33,7 +34,7 @@ RUN pnpm run build
 # -- Build server
 FROM base AS server-builder
 WORKDIR /app/server
-/* Copy server sources from cloned repo inside base (supports builds without host repo) */
+# Copy server sources from cloned repo inside base (supports builds without host repo)
 COPY --from=base /src/server/package.json ./
 COPY --from=base /src/server/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prefer-frozen-lockfile=false || pnpm install
