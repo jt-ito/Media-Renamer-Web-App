@@ -241,7 +241,19 @@ async function bootstrap() {
       const st = fs.statSync(f);
       if (!st.isFile()) continue;
       if (isApproved(f, st.size)) continue;
-      candidates.push({ path: f, size: st.size });
+      // Normalize path separators to forward slashes for consistent UI behavior
+      let normalizedPath = f.replace(/\\+/g, '/');
+      // If the configured library was mounted at /media inside the container,
+      // allow mapping common host mount prefixes (like /mnt/sda1) to /media for UI clarity.
+      try {
+        const inRoot = lib.inputRoot || '';
+        if (inRoot.startsWith('/media') && normalizedPath.match(/^\/mnt\/[a-z0-9]+\//)) {
+          // map /mnt/sdXY/<rest> -> /media/<rest> when the container exposes /media
+          const parts = normalizedPath.split('/').slice(3); // remove ['', 'mnt', 'sda1'] -> rest
+          normalizedPath = '/media/' + parts.join('/');
+        }
+      } catch (e) { /* best-effort */ }
+      candidates.push({ path: normalizedPath, size: st.size });
     }
 
   const slice = candidates.slice(offset, offset + limit);

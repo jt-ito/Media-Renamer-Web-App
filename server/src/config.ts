@@ -3,6 +3,8 @@ import path from 'path';
 import { Library } from './types.js';
 
 const CONFIG_PATH = process.env.CONFIG_PATH || '/app/config/config.json';
+// Allow overriding logs path for persistence when running in Docker
+export const LOGS_PATH = process.env.LOGS_PATH || '/app/logs';
 
 export function loadLibraries(): Library[] {
   if (!fs.existsSync(CONFIG_PATH)) return [];
@@ -29,13 +31,15 @@ export function loadLibraries(): Library[] {
         const drive = m[1].toLowerCase();
         const rest = m[2] || '';
         candidates.push(`/mnt/${drive}/${rest}`);
+        // If the host mounts media at /media, also try mapping to that path
+        if (rest) candidates.push(`/media/${rest}`);
       }
       const unc = s.match(/^\/\/(.+)$/);
       if (unc && process.platform !== 'win32') {
         candidates.push(s.replace(/^\/+/, '/'));
       }
 
-      for (const c of candidates) {
+  for (const c of candidates) {
         try {
           const resolved = path.resolve(c);
           if (fs.existsSync(resolved)) return resolved;
