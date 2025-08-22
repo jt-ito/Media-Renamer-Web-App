@@ -392,6 +392,22 @@ async function bootstrap() {
     }
   });
 
+  // Delete a library by id
+  app.delete('/api/libraries/:id', async (req, reply) => {
+    try {
+      const params = req.params as any;
+      const id = String(params.id || '');
+      const libs = loadLibraries();
+      const next = (Array.isArray(libs) ? libs.filter(l => l.id !== id) : libs) || [];
+      saveLibraries(next as any);
+      log('info', `Library deleted: ${id}`);
+      return { ok: true, libraries: next };
+    } catch (e: any) {
+      log('error', `Failed to delete library: ${e?.message ?? String(e)}`);
+      reply.status(500).send({ error: 'Failed to delete library' });
+    }
+  });
+
   // ...no apply-mounts endpoint (host-only override approach preferred)
 
   app.get('/api/approved', async () => approvedList());

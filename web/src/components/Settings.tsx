@@ -243,6 +243,7 @@ export function Settings() {
   setTvdbKey('');
   };
 
+
   // Simple client-side validation for paths (best-effort)
   function validatePath(p: string) {
     if (!p || !p.trim()) return 'Path cannot be empty';
