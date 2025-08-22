@@ -226,6 +226,13 @@ async function bootstrap() {
       return;
     }
 
+    // Ensure the configured library path exists on this host before scanning.
+    if (!lib.inputRoot || !fs.existsSync(lib.inputRoot)) {
+      log('error', `Scan failed: library path does not exist or is inaccessible: ${lib.inputRoot}`);
+      reply.status(400).send({ error: 'Library path does not exist or is inaccessible on the server. Check that the host path is mounted into the container and permissions allow reading.' });
+      return;
+    }
+
     const patterns = ['**/*.mkv', '**/*.mp4', '**/*.avi', '**/*.mov', '**/*.m4v'];
     const files = await fg(patterns, { cwd: lib.inputRoot, absolute: true, suppressErrors: true });
 

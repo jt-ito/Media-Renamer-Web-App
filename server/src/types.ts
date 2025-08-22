@@ -4,8 +4,8 @@ export interface Library {
   id: string;
   name: string;
   type: MediaType;
-  inputRoot: string;
-  outputRoot: string;
+  inputRoot?: string;
+  outputRoot?: string;
   includeProviderTags?: boolean;
   linkMode?: 'hardlink' | 'rename';
   allowCopyFallback?: boolean;

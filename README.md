@@ -143,10 +143,33 @@ services:
       - ./config:/app/config:ro
 ```
 
+Example for `media-renamer` (non-functional example showing media mount / privilege note):
+
+```yaml
+version: '3.8'
+services:
+  media-renamer:
+    image: media-renamer:latest
+    container_name: media-renamer
+    privileged: true # required on some hosts to read certain mounted media paths; prefer adjusting permissions instead
+    ports:
+      - 8787:8787
+    environment:
+      - PORT=8787
+      - STATIC_ROOT=/app/web/dist
+    volumes:
+      - ${JF_MEDIA_PATH}:/media:rw
+```
+
 ## Common troubleshooting
 - pnpm frozen lockfile errors: run `pnpm install` locally in the package (server/web) to update `pnpm-lock.yaml` and commit it.
 - Windows CRLF vs LF: Git may warn about CRLF conversion when editing files on Windows; this is usually safe but you can set core.autocrlf appropriately.
 - Port conflicts: server defaults may collide with another process — change the server port in `config/settings.json` or via env var.
+
+Linux container / host mounts and permissions
+- If you run via Docker Compose on Linux, the provided `_containers/docker-compose.yml` and root `docker-compose.yml` mount your media library (configured via `${JF_MEDIA_PATH}` in `_containers/docker-compose.env`) into the container under `/media`.
+- The service in the compose file runs as `root` inside the container and is marked `privileged: true` to ensure it can read host-mounted paths that may have restrictive permissions. This is necessary when your media is mounted from external storage or requires elevated privileges to list files. If you prefer not to run privileged, bind the media directory with permissive ownership (chown/chmod) or run the container with a specific `PUID`/`PGID` that matches the host file owner.
+- If scanning returns "Library path does not exist or is inaccessible" from the UI, verify the host path is reachable from the container (for example `docker run --rm -v ${JF_MEDIA_PATH}:/media:ro busybox ls -la /media`) and check file ownership/permissions.
 
 ## Useful commands
 - Run server dev: `cd server && pnpm install && pnpm run dev`
