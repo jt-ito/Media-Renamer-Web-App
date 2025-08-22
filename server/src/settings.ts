@@ -13,6 +13,10 @@ export type Settings = {
   movieScheme?: string;  // relative path template without extension on final segment
   seriesScheme?: string; // relative path template without extension on final segment
   port?: number;
+  // Absolute path to the docker-compose env file that should be updated
+  // when libraries/settings change. Optional; when set the server will try
+  // to write MR_INPUT_PATH/MR_OUTPUT_PATH into this file.
+  composeEnvFile?: string;
   // no external guessit toggle; parsing uses built-in heuristics
 };
 

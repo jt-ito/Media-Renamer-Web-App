@@ -5,6 +5,7 @@ import fstatic from '@fastify/static';
 import fg from 'fast-glob';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
@@ -106,6 +107,109 @@ async function bootstrap() {
   // guessit support removed; rely on builtin parsing
 
   const idFromPath = (p: string) => crypto.createHash('sha1').update(p).digest('hex');
+
+  /**
+   * Update MR_INPUT_PATH and MR_OUTPUT_PATH in the docker-compose env file.
+   * Uses MR_COMPOSE_ENV_FILE env var if set, otherwise falls back to _containers/docker-compose.env
+   * This is best-effort: it updates or appends the two variables with the first values found.
+   */
+  function updateComposeEnvFromLibs(inputRoots: string[], outputRoots: string[]) {
+    try {
+      // Prefer a saved settings value if present (UI can set this via settings)
+      const settings = loadSettings();
+      const envFileFromSettings = (settings && (settings as any).composeEnvFile) ? String((settings as any).composeEnvFile) : undefined;
+      const envFile = envFileFromSettings || process.env.MR_COMPOSE_ENV_FILE || path.resolve(__dirname, '..', '..', '_containers', 'docker-compose.env');
+      if (!fs.existsSync(envFile)) throw new Error(`compose env file not found: ${envFile}`);
+
+      const content = fs.readFileSync(envFile, 'utf8');
+      const lines = content.split(/\r?\n/);
+      const newLines: string[] = [];
+      const setVar = (name: string, value: string | undefined) => `${name}=${value ?? ''}`;
+
+      const wantInput = inputRoots.length ? inputRoots[0] : '';
+      const wantOutput = outputRoots.length ? outputRoots[0] : '';
+
+      let foundInput = false;
+      let foundOutput = false;
+      for (const ln of lines) {
+        if (/^MR_INPUT_PATH\s*=/.test(ln)) { foundInput = true; newLines.push(setVar('MR_INPUT_PATH', wantInput)); continue; }
+        if (/^MR_OUTPUT_PATH\s*=/.test(ln)) { foundOutput = true; newLines.push(setVar('MR_OUTPUT_PATH', wantOutput)); continue; }
+        newLines.push(ln);
+      }
+      if (!foundInput) newLines.push(setVar('MR_INPUT_PATH', wantInput));
+      if (!foundOutput) newLines.push(setVar('MR_OUTPUT_PATH', wantOutput));
+
+      fs.writeFileSync(envFile, newLines.join(os.EOL), 'utf8');
+      log('info', `Updated compose env file ${envFile} with MR_INPUT_PATH/MR_OUTPUT_PATH`);
+    } catch (e) {
+      log('warn', `updateComposeEnvFromLibs failed: ${String(e)}`);
+    }
+  }
+
+  /**
+   * Create symlinks at <baseDir>/input and <baseDir>/output pointing to the
+   * first inputRoots[0] and outputRoots[0] respectively. The baseDir is chosen
+   * from (in order): MR_BASE_DIR env var, MR_BUILD_PATH env var, settings.composeEnvFile's directory.
+   * If none are set, fall back to '/home/jt/containers/media-renamer' as a reasonable default
+   * for typical host setups (this fallback can be overridden by setting MR_BASE_DIR).
+   */
+  function createSymlinksFromLibs(inputRoots: string[], outputRoots: string[]) {
+    const results: { input?: { ok: boolean; msg: string }; output?: { ok: boolean; msg: string } } = {};
+    try {
+      const settings = loadSettings();
+      const envBase = process.env.MR_BASE_DIR || process.env.MR_BUILD_PATH;
+      const settingsBase = settings && (settings as any).composeEnvFile ? path.dirname(String((settings as any).composeEnvFile)) : undefined;
+      const baseDir = envBase || settingsBase || '/home/jt/containers/media-renamer';
+
+      // ensure base exists
+      try { fs.mkdirSync(baseDir, { recursive: true }); } catch (e) { const msg = `Could not ensure baseDir ${baseDir}: ${String(e)}`; log('error', msg); results.input = { ok: false, msg }; results.output = { ok: false, msg }; return results; }
+
+      const makeLink = (linkName: string, target?: string) => {
+        if (!target) return { ok: false, msg: 'no target provided' };
+        const linkPath = path.join(baseDir, linkName);
+        try {
+          const resolvedTarget = path.resolve(String(target));
+          // If link exists and points to same target, noop
+          try {
+            if (fs.existsSync(linkPath)) {
+              const stat = fs.lstatSync(linkPath);
+              if (stat.isSymbolicLink()) {
+                const cur = fs.readlinkSync(linkPath);
+                if (path.resolve(cur) === resolvedTarget) {
+                  const msg = `Symlink ${linkPath} already correct -> ${resolvedTarget}`;
+                  log('info', msg);
+                  return { ok: true, msg };
+                }
+              }
+              // remove existing file/dir/link
+              try { fs.rmSync(linkPath, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+            }
+            // create the symlink (type 'dir' is best-effort on Windows)
+            try { fs.symlinkSync(resolvedTarget, linkPath, 'dir'); }
+            catch (e) {
+              // fallback: try without type
+              try { fs.symlinkSync(resolvedTarget, linkPath); } catch (ee) { throw ee; }
+            }
+            const msg = `Created symlink ${linkPath} -> ${resolvedTarget}`;
+            log('info', msg);
+            return { ok: true, msg };
+          } catch (e) {
+            const msg = `Failed to create symlink ${linkPath} -> ${resolvedTarget}: ${String(e)}`;
+            log('error', msg);
+            return { ok: false, msg };
+          }
+        } catch (e) { return { ok: false, msg: String(e) }; }
+      };
+
+      results.input = makeLink('input', inputRoots && inputRoots.length ? inputRoots[0] : undefined);
+      results.output = makeLink('output', outputRoots && outputRoots.length ? outputRoots[0] : undefined);
+      return results;
+    } catch (e) {
+      const msg = `createSymlinksFromLibs failed: ${String(e)}`;
+      log('error', msg);
+      return { input: { ok: false, msg }, output: { ok: false, msg } };
+    }
+  }
 
   // When a file is approved, also try to find sibling files in the same
   // directory that look like the same series/season/episode but differ only
@@ -228,6 +332,27 @@ async function bootstrap() {
       const body = req.body as Library[];
       saveLibraries(body);
       log('info', `Libraries saved: ${body.map(b => `${b.name}(${b.type})`).join(', ')}`);
+      // After saving libraries, update MR_INPUT_PATH / MR_OUTPUT_PATH in compose env
+      // After saving libraries, create host-visible symlinks for input/output
+      try {
+        if (Array.isArray(body) && body.length) {
+          const inputRoots = Array.from(new Set(body.map(b => String(b.inputRoot || '').trim()).filter(Boolean)));
+          const outputRoots = Array.from(new Set(body.map(b => String((b as any).outputRoot || '').trim()).filter(Boolean)));
+          try {
+            const symlinkResults = createSymlinksFromLibs(inputRoots, outputRoots);
+            // If any symlink failed, log an explicit error for visibility
+            if ((symlinkResults.input && !symlinkResults.input.ok) || (symlinkResults.output && !symlinkResults.output.ok)) {
+              log('error', `Symlink creation had failures: ${JSON.stringify(symlinkResults)}`);
+            } else {
+              log('info', `Symlink creation succeeded: ${JSON.stringify(symlinkResults)}`);
+            }
+            // include symlink results in the API response
+            reply.send({ ok: true, symlinks: symlinkResults });
+            return;
+          } catch (e) { log('warn', `createSymlinksFromLibs error: ${String(e)}`); }
+        }
+      } catch (e) { log('warn', `Failed to create symlinks after saving libraries: ${String(e)}`); }
+
       reply.send({ ok: true });
     } catch (e: any) {
       log('error', `Failed to save libraries: ${e?.message ?? String(e)}`);
@@ -787,6 +912,16 @@ async function bootstrap() {
   // Persist merged settings first (we want saves to always persist)
   const prevSettings = loadSettings();
   saveSettings(next);
+
+  // If the user set a composeEnvFile in settings, activate it in the running process
+  try {
+    const prevCompose = (prevSettings && (prevSettings as any).composeEnvFile) ? String((prevSettings as any).composeEnvFile) : '';
+    const newCompose = (next && (next as any).composeEnvFile) ? String((next as any).composeEnvFile) : '';
+    if (newCompose && newCompose !== prevCompose) {
+      process.env.MR_COMPOSE_ENV_FILE = newCompose;
+      log('info', `Activated compose env file from settings: ${newCompose}`);
+    }
+  } catch (e) { /* ignore */ }
 
   // guessit removed; nothing to apply
 
