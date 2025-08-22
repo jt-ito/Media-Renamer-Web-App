@@ -184,11 +184,43 @@ async function bootstrap() {
               // remove existing file/dir/link
               try { fs.rmSync(linkPath, { recursive: true, force: true }); } catch (e) { /* ignore */ }
             }
-            // create the symlink (type 'dir' is best-effort on Windows)
-            try { fs.symlinkSync(resolvedTarget, linkPath, 'dir'); }
-            catch (e) {
-              // fallback: try without type
-              try { fs.symlinkSync(resolvedTarget, linkPath); } catch (ee) { throw ee; }
+            // defensive: if the target itself is a symlink that points back to the
+            // linkPath (a reverse/circular link), remove it to avoid EEXIST errors
+            try {
+              if (fs.existsSync(resolvedTarget)) {
+                try {
+                  const tstat = fs.lstatSync(resolvedTarget);
+                  if (tstat.isSymbolicLink()) {
+                    const cur = fs.readlinkSync(resolvedTarget);
+                    if (path.resolve(cur) === path.resolve(linkPath)) {
+                      // remove the reverse link so we can create the intended one
+                      fs.rmSync(resolvedTarget, { recursive: true, force: true });
+                      log('info', `Removed reverse symlink ${resolvedTarget} -> ${cur}`);
+                    }
+                  }
+                } catch (e) { /* ignore errors when inspecting target */ }
+              }
+
+              // create the symlink (type 'dir' is best-effort on Windows)
+              try {
+                fs.symlinkSync(resolvedTarget, linkPath, 'dir');
+              } catch (e: any) {
+                // If EEXIST, remove any stale link at linkPath and retry once
+                if (e && e.code === 'EEXIST') {
+                  try { fs.rmSync(linkPath, { recursive: true, force: true }); } catch (er) { /* ignore */ }
+                  try { fs.symlinkSync(resolvedTarget, linkPath, 'dir'); }
+                  catch (ee) { // fallback: try without type
+                    try { fs.symlinkSync(resolvedTarget, linkPath); } catch (eee) { throw eee; }
+                  }
+                } else {
+                  // fallback: try without type
+                  try { fs.symlinkSync(resolvedTarget, linkPath); } catch (ee) { throw ee; }
+                }
+              }
+            } catch (e) {
+              const msg = `Failed to create symlink ${linkPath} -> ${resolvedTarget}: ${String(e)}`;
+              log('error', msg);
+              return { ok: false, msg };
             }
             const msg = `Created symlink ${linkPath} -> ${resolvedTarget}`;
             log('info', msg);
