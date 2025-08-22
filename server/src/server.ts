@@ -228,9 +228,51 @@ async function bootstrap() {
 
     // Ensure the configured library path exists on this host before scanning.
     if (!lib.inputRoot || !fs.existsSync(lib.inputRoot)) {
-      log('error', `Scan failed: library path does not exist or is inaccessible: ${lib.inputRoot}`);
-      reply.status(400).send({ error: 'Library path does not exist or is inaccessible on the server. Check that the host path is mounted into the container and permissions allow reading.' });
-      return;
+      // Best-effort: try common alternative mount locations inside the container
+      // (for example, host path /mnt/sda1/Foo might be mounted at /media/Foo inside
+      // the container). If we find a candidate that exists, use it instead.
+      try {
+        const orig = String(lib.inputRoot || '');
+        const candidates: string[] = [];
+        // Map /mnt/<device>/rest -> /media/rest
+        const m = orig.match(/^\/mnt\/[^\/]+\/(.*)$/);
+        if (m && m[1]) candidates.push('/media/' + m[1]);
+        // If the original is /media/... but not present, try searching /media for
+        // a suffix match (e.g., /media/<label>/rest)
+        const suffix = orig.replace(/^\/+/, '');
+        if (suffix) {
+          // build incremental suffix candidates: try shorter suffixes first
+          const parts = suffix.split('/');
+          for (let i = 1; i <= parts.length; i++) {
+            candidates.push('/' + parts.slice(parts.length - i).join('/'));
+          }
+        }
+        // De-duplicate candidates
+        const seen = new Set<string>();
+        let found: string | undefined;
+        for (const c of candidates) {
+          if (!c) continue;
+          const resolved = path.resolve(c);
+          if (seen.has(resolved)) continue;
+          seen.add(resolved);
+          try {
+            if (fs.existsSync(resolved)) { found = resolved; break; }
+          } catch (e) { /* ignore */ }
+        }
+        if (found) {
+          log('info', `Scan: original library path ${lib.inputRoot} not found; using candidate ${found}`);
+          // mutate lib for this request so scanning continues
+          (lib as any).inputRoot = found;
+        } else {
+          log('error', `Scan failed: library path does not exist or is inaccessible: ${lib.inputRoot}`);
+          reply.status(400).send({ error: 'Library path does not exist or is inaccessible on the server. Check that the host path is mounted into the container and permissions allow reading.' });
+          return;
+        }
+      } catch (e) {
+        log('error', `Scan failed: library path does not exist or is inaccessible: ${lib.inputRoot}`);
+        reply.status(400).send({ error: 'Library path does not exist or is inaccessible on the server. Check that the host path is mounted into the container and permissions allow reading.' });
+        return;
+      }
     }
 
     const patterns = ['**/*.mkv', '**/*.mp4', '**/*.avi', '**/*.mov', '**/*.m4v'];
