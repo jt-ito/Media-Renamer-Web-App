@@ -66,12 +66,14 @@ export function movieOutputPath(lib: Library, cand: MatchCandidate, ext: string)
   const settings = loadSettings();
   const title = sanitize(cand.name);
   const year = cand.year ? String(cand.year) : '';
+  // Ensure outputRoot is a concrete string for path operations
+  const outputRoot = lib.outputRoot ?? '';
   if (settings.movieScheme) {
     const relNoExt = applyScheme(settings.movieScheme, { title, year });
-    return path.join(lib.outputRoot, relNoExt + ext);
+    return path.join(outputRoot, relNoExt + ext);
   }
   const base = `${title}${year ? ` (${year})` : ''}`;
-  return path.join(lib.outputRoot, base, `${base}${ext}`);
+  return path.join(outputRoot, base, `${base}${ext}`);
 }
 
 export function episodeOutputPath(
@@ -95,21 +97,23 @@ export function episodeOutputPath(
     log('debug', `[episodeOutputPath] Trying to extract year from series.name: match=${m}`);
     if (m) { year = m[1]; debugSource = 'series.name'; }
   }
-  if (!year && lib && lib.inputRoot) {
-    const m = String(lib.inputRoot).match(/\((\d{4})\)/);
+  const inputRoot = lib.inputRoot ?? '';
+  if (!year && lib && inputRoot) {
+    const m = String(inputRoot).match(/\((\d{4})\)/);
     log('debug', `[episodeOutputPath] Trying to extract year from lib.inputRoot: match=${m}`);
     if (m) { year = m[1]; debugSource = 'lib.inputRoot'; }
   }
   // FINAL fallback: extract any 4-digit year from the full input path (folder or file)
-  if (!year && lib && lib.inputRoot) {
-    const m = String(lib.inputRoot).match(/(19|20)\d{2}/);
+  if (!year && lib && inputRoot) {
+    const m = String(inputRoot).match(/(19|20)\d{2}/);
     log('debug', `[episodeOutputPath] FINAL fallback: any 4-digit year from inputRoot: match=${m}`);
     if (m) { year = m[0]; debugSource = 'inputRoot-any-4digit'; }
   }
   const seriesFolder = year ? `${seriesName} (${year})` : seriesName;
   const epCode = `S${pad2(season)}E${eps.map(pad2).join('E')}`;
   const epTitle = episodeTitle ? sanitize(episodeTitle) : '';
-  const folder = path.join(lib.outputRoot, seriesFolder, `Season ${pad2(season)}`);
+  const outputRoot = lib.outputRoot ?? '';
+  const folder = path.join(outputRoot, seriesFolder, `Season ${pad2(season)}`);
   const file = `${seriesFolder} - ${epCode}${epTitle ? ` - ${epTitle}` : ''}${ext}`;
   const finalPath = path.join(folder, file);
   log('debug', `[episodeOutputPath] RESULT: year='${year}' (source=${debugSource}), finalPath='${finalPath}'`);
