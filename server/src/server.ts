@@ -77,6 +77,31 @@ async function bootstrap() {
   // Approvals registry
   initApproved();
 
+  // Ensure default config and settings files exist on first run. This creates
+  // `/app/config/config.json` and `/app/config/settings.json` (or the paths
+  // configured via CONFIG_PATH/SETTINGS_PATH) so the UI and API have a
+  // persistent place to read/write from when running in Docker.
+  try {
+    try {
+      const existingLibs = loadLibraries();
+      // saveLibraries will create the directory and file if missing
+      saveLibraries(existingLibs || []);
+      app.log?.info?.('Ensured config/config.json exists');
+    } catch (e) {
+      app.log?.warn?.(`Could not ensure libraries config: ${String(e)}`);
+    }
+    try {
+      const existingSettings = loadSettings();
+      // saveSettings will create the directory and file if missing
+      saveSettings(existingSettings || {} as any);
+      app.log?.info?.('Ensured config/settings.json exists');
+    } catch (e) {
+      app.log?.warn?.(`Could not ensure settings config: ${String(e)}`);
+    }
+  } catch (e) {
+    // best-effort, do not fail startup
+  }
+
   // guessit support removed; rely on builtin parsing
 
   const idFromPath = (p: string) => crypto.createHash('sha1').update(p).digest('hex');
