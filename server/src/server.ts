@@ -259,6 +259,28 @@ async function bootstrap() {
             if (fs.existsSync(resolved)) { found = resolved; break; }
           } catch (e) { /* ignore */ }
         }
+        // If not found yet, try searching under /media for a matching suffix.
+        if (!found) {
+          try {
+            const lastPart = orig.split('/').filter(Boolean).pop() || '';
+            if (lastPart && fs.existsSync('/media')) {
+              const entries = fs.readdirSync('/media');
+              for (const ent of entries) {
+                try {
+                  const cand = path.join('/media', ent, lastPart);
+                  if (fs.existsSync(cand)) { found = path.resolve(cand); break; }
+                  // Also try matching deeper suffix of the original path
+                  const rest = orig.replace(/^\/+/,'').split('/');
+                  for (let i = 1; i <= rest.length && !found; i++) {
+                    const suffix = rest.slice(rest.length - i).join('/');
+                    const cand2 = path.join('/media', ent, suffix);
+                    if (fs.existsSync(cand2)) { found = path.resolve(cand2); break; }
+                  }
+                } catch (e) { /* ignore per-entry */ }
+              }
+            }
+          } catch (e) { /* ignore */ }
+        }
         if (found) {
           log('info', `Scan: original library path ${lib.inputRoot} not found; using candidate ${found}`);
           // mutate lib for this request so scanning continues
