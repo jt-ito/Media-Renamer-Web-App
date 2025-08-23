@@ -29,16 +29,18 @@ function norm(s: string) {
   return s.replace(/[._]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 }
 function stripNoise(s: string) {
-  return norm(s)
+  // Remove known noise tokens first (so we catch forms like H.264, x264, AAC2.0)
+  return (s || '')
     .replace(FANSUB_BRACKETS, ' ')
     .replace(CURLY, ' ')
-  .replace(PAREN_MISC, ' ')
-  .replace(EXTENDED_TAGS, ' ')
-  .replace(RES_TAGS, ' ')
-  .replace(CODECS, ' ')
-  .replace(RELEASE_TAGS, ' ')
-  .replace(MISC_TAGS, ' ')
-  .replace(TRAILING_GROUP, ' ')
+    .replace(PAREN_MISC, ' ')
+    .replace(EXTENDED_TAGS, ' ')
+    .replace(RES_TAGS, ' ')
+    .replace(CODECS, ' ')
+    .replace(RELEASE_TAGS, ' ')
+    .replace(MISC_TAGS, ' ')
+    .replace(TRAILING_GROUP, ' ')
+    .replace(/[._]+/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
@@ -205,7 +207,9 @@ export function inferFromPath(fullPath: string): ParsedGuess {
       if (after) {
         const tit = stripTrailingRangeAndComplete(after);
         if (tit) {
-          episode_title = norm(tit);
+          // remove trailing non-alphanumeric punctuation leftover (like trailing '-')
+          const cleanedTit = tit.replace(/[\-_.\s:;]+$/g, '').trim();
+          episode_title = norm(cleanedTit);
           const s = season ?? 1;
           const e = episode_number ?? (episodes && episodes[0]) ?? 1;
           const paddedS = String(s).padStart(2, '0');

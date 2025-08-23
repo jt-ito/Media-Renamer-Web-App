@@ -63,7 +63,43 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
   return (js.data || []).map((d: any) => {
     // Determine the TVDB id and a readable name
     const id = Number(d.tvdb_id ?? d.id ?? d.seriesId ?? d.movieId ?? 0) || 0;
-    const name = d.name || d.title || d.translations?.name || d.slug || '';
+    // Prefer English / romaji translations when available. TVDB can return localized
+    // names (including Japanese). If the returned `name` is CJK, but an English
+    // translation exists, prefer the English/romaji one.
+    const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
+    function pickPreferredName(d: any) {
+      // try translations in several shapes
+      const tr = d.translations;
+      const preferLangs = ['en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn'];
+      let preferred: string | undefined;
+      if (tr) {
+        if (Array.isArray(tr)) {
+          for (const p of preferLangs) {
+            const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
+            if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
+          }
+          if (!preferred) {
+            const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
+            if (en) preferred = en.name || en.title || en.translation;
+          }
+        } else if (typeof tr === 'object') {
+          for (const p of preferLangs) {
+            if (tr[p]) {
+              preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation);
+              break;
+            }
+          }
+          if (!preferred) {
+            const k = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
+            if (k) preferred = (typeof tr[k] === 'string') ? tr[k] : (tr[k].name || tr[k].title || tr[k].translation);
+          }
+        }
+      }
+      let name = d.name || d.title || preferred || d.slug || '';
+      if (cjkRe.test((name || '') + '') && preferred) name = preferred;
+      return (name || '').toString();
+    }
+    const name = pickPreferredName(d);
 
     // Year extraction: prefer explicit `year` or try from known date fields
     let y: number | undefined;
