@@ -1,0 +1,4 @@
+{
+	"tvdbKey": "", // set your TVDB v4 API key here or via TVDB_API_KEY env var
+	"tvdbLanguage": "en"
+}
