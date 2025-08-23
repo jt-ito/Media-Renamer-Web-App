@@ -88,7 +88,47 @@ export function episodeOutputPath(
   ext = ext ? String(ext) : '';
   if (ext && !ext.startsWith('.')) ext = '.' + ext;
   const settings = loadSettings();
-  const seriesName = sanitize(series.name);
+  const chooseDisplayName = (s: MatchCandidate) => {
+    const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
+    try {
+      const audit = (s as any)?.extra?.audit;
+      // 1) if server already picked a translation/alias, use it
+      const picked = (s as any)?.extra?.nameSource || (s as any)?._pickedNameSource;
+      if (picked && (picked === 'translation' || picked === 'alias')) return String(s.name || '');
+
+      // 2) try audit translations (array)
+      if (audit?.translations && Array.isArray(audit.translations)) {
+        const en = audit.translations.find((t:any)=> t && String(t.language||'').toLowerCase().startsWith('en'));
+        if (en && (en.name || en.title)) return String(en.name || en.title || en.translation || '');
+      }
+
+      // 3) try aliases (object entries)
+      if (audit?.aliases && Array.isArray(audit.aliases) && audit.aliases.length) {
+        const firstObj = audit.aliases[0];
+        if (typeof firstObj === 'object') {
+          const prefer = ['en','eng','en-us','en-gb','romaji'];
+          for (const p of prefer) {
+            const found = (audit.aliases as any[]).find((a:any)=> a && (String(a.language||'').toLowerCase().startsWith(p) || String(a.iso_639_3||'').toLowerCase()===p));
+            if (found && (found.name || found.title)) return String(found.name || found.title || found.translation || '');
+          }
+        } else {
+          // aliases are strings: prefer the first non-CJK alias
+          const nonCjk = (audit.aliases as string[]).find((x:any)=> !cjkRe.test(String(x||'')));
+          if (nonCjk) return String(nonCjk);
+        }
+      }
+
+      // 4) fallback: prefer slug or original name unless it's CJK and no translation found
+  const name = String(s.name || (s as any).slug || '');
+      if (cjkRe.test(name)) {
+        // if name is CJK but we couldn't find non-CJK translations/aliases, still return slug if present
+  if ((s as any).slug) return String((s as any).slug);
+      }
+      return name;
+  } catch (e) { return String(s.name || (s as any).slug || ''); }
+  };
+  const rawDisplayName = chooseDisplayName(series);
+  const seriesName = sanitize(rawDisplayName || series.name || '');
   let year = series.year ? String(series.year) : '';
   let debugSource = 'series.year';
   log('debug', `[episodeOutputPath] INPUTS: series.name='${series.name}', series.year='${series.year}', lib.inputRoot='${lib.inputRoot}', lib.outputRoot='${lib.outputRoot}'`);
