@@ -102,6 +102,25 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
           }
         }
       }
+        // If translations didn't yield a preferred name, TVDB sometimes provides
+        // aliases (either as strings or objects with language tags). Use those
+        // as a fallback: prefer aliased English / romaji names when available.
+        if (!preferred && d.aliases) {
+          const aliases = d.aliases;
+          if (Array.isArray(aliases) && aliases.length) {
+            // alias entries can be objects like { language: 'eng', name: '...' }
+            if (typeof aliases[0] === 'object') {
+              for (const p of preferLangs) {
+                const found = (aliases as any[]).find((a: any) => (a.language && a.language.toString().toLowerCase().startsWith(p)) || (a.iso_639_3 && a.iso_639_3.toString().toLowerCase() === p));
+                if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
+              }
+            } else {
+              // aliases are simple strings; prefer the first non-CJK alias
+              const nonCjk = (aliases as string[]).find(s => !cjkRe.test((s||'').toString()));
+              if (nonCjk) preferred = nonCjk;
+            }
+          }
+        }
       let name = d.name || d.title || preferred || d.slug || '';
       if (cjkRe.test((name || '') + '') && preferred) name = preferred;
       return (name || '').toString();
