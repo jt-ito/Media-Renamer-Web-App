@@ -108,8 +108,25 @@ export async function getEpisodeByAiredOrder(seriesId: number, season: number, e
 function pickPreferredEpisodeName(e: any, langOverride?: string) {
   if (!e) return undefined;
   const settingsLocal = loadSettings() as { tvdbLanguage?: string };
-  const settingsLang = (langOverride || settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
-  const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
+  const rawRequested = (langOverride || settingsLocal.tvdbLanguage || 'en').toString() || 'en';
+
+  // Normalize user-provided language strings into canonical tokens we can match
+  function normalizeLang(s: string|undefined|null) {
+    if (!s) return '';
+    const t = String(s).toLowerCase().trim();
+    if (!t) return '';
+    // common mappings
+    if (t === 'romaji' || t === 'ja-romaji' || t === 'ja-latn') return 'romaji';
+    if (t.startsWith('en') || t.includes('english')) return 'en';
+    if (t === 'eng') return 'eng';
+    if (t.startsWith('ja') || t === 'jpn' || t.includes('japanese')) return 'ja';
+    if (t.startsWith('zh') || t.includes('chinese') || t === 'chi') return 'zh';
+    // try to return two/three letter ISO-like tokens
+    return t;
+  }
+
+  const requested = normalizeLang(rawRequested);
+  const preferLangs = [requested, 'en', 'eng', 'romaji', 'ja', 'ja-latn', 'zh', 'zh-cn', 'zh-tw'];
   const tr = e.translations || e.translatedNames || e.translationsMap;
   try {
     // Log a short summary for diagnostics
@@ -122,22 +139,48 @@ function pickPreferredEpisodeName(e: any, langOverride?: string) {
   } catch (e) {}
   let preferred: string | undefined;
   if (tr) {
+    // Helper: test whether a translation entry matches a normalized token
+    function trMatchesToken(tEntry: any, token: string) {
+      if (!tEntry || !token) return false;
+      const langField = (tEntry.language || tEntry.lang || '').toString().toLowerCase();
+      const iso = (tEntry.iso_639_3 || '').toString().toLowerCase();
+      const nameLike = (tEntry.name || tEntry.title || tEntry.translation || '').toString();
+      if (!langField && !iso) return false;
+      if (token === 'romaji') {
+        // Some feeds mark romanized Japanese as 'ja-latn' or similar
+        if (langField.includes('romaji') || langField.includes('latn') || iso === 'rom') return true;
+      }
+      if (iso && iso === token) return true;
+      if (langField && (langField === token || langField.startsWith(token) || langField.includes(token))) return true;
+      return false;
+    }
+
     if (Array.isArray(tr)) {
+      // prefer in order of preferLangs
       for (const p of preferLangs) {
-        const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
+        if (!p) continue;
+        const found = tr.find((t: any) => trMatchesToken(t, p));
         if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
       }
       if (!preferred) {
-        const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
+        const en = tr.find((t: any) => trMatchesToken(t, 'en'));
         if (en) preferred = en.name || en.title || en.translation;
       }
     } else if (typeof tr === 'object') {
+      // object keyed by language tokens
       for (const p of preferLangs) {
-        if (tr[p]) { preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation); break; }
+        if (!p) continue;
+        // direct key match
+        const keyMatch = Object.keys(tr || {}).find(k => k.toString().toLowerCase() === p || k.toString().toLowerCase().startsWith(p));
+        if (keyMatch) {
+          const val = tr[keyMatch];
+          preferred = (typeof val === 'string') ? val : (val && (val.name || val.title || val.translation));
+          if (preferred) break;
+        }
       }
       if (!preferred) {
-        const k = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
-        if (k) preferred = (typeof tr[k] === 'string') ? tr[k] : (tr[k].name || tr[k].title || tr[k].translation);
+        const keyEn = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
+        if (keyEn) preferred = (typeof tr[keyEn] === 'string') ? tr[keyEn] : (tr[keyEn].name || tr[keyEn].title || tr[keyEn].translation);
       }
     }
   }
@@ -237,31 +280,54 @@ function pickPreferredName(d: any) {
     return filtered[0].s;
   }
   // Avoid depending on the exact shape of the exported `Settings` type from
-  // `settings.ts` (some branches or CI snapshots may not include
-  // `tvdbLanguage`). Cast to a local, explicit shape that makes the
-  // optionality clear while keeping strict typing for the rest of this file.
+  // `settings.ts`. Normalize the preferred language and build a prefer-list.
   const settingsLocal = loadSettings() as { tvdbLanguage?: string };
-  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
+  function normalizeLang(s: string|undefined|null) {
+    if (!s) return '';
+    const t = String(s).toLowerCase().trim();
+    if (!t) return '';
+    if (t === 'romaji' || t === 'ja-romaji' || t === 'ja-latn') return 'romaji';
+    if (t.startsWith('en') || t.includes('english')) return 'en';
+    if (t === 'eng') return 'eng';
+    if (t.startsWith('ja') || t === 'jpn' || t.includes('japanese')) return 'ja';
+    if (t.startsWith('zh') || t.includes('chinese') || t === 'chi') return 'zh';
+    return t;
+  }
+  const settingsLang = normalizeLang(settingsLocal.tvdbLanguage || 'en');
   const tr = d.translations;
-  const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
+  const preferLangs = [settingsLang, 'en', 'eng', 'romaji', 'ja', 'ja-latn', 'zh', 'zh-cn', 'zh-tw'];
   let preferred: string | undefined;
   let pickedSource: string | undefined;
   if (tr) {
     if (Array.isArray(tr)) {
+      function trMatchesToken(tEntry: any, token: string) {
+        if (!tEntry || !token) return false;
+        const langField = (tEntry.language || tEntry.lang || '').toString().toLowerCase();
+        const iso = (tEntry.iso_639_3 || '').toString().toLowerCase();
+        if (token === 'romaji') {
+          if (langField.includes('romaji') || langField.includes('latn') || iso === 'rom') return true;
+        }
+        if (iso && iso === token) return true;
+        if (langField && (langField === token || langField.startsWith(token) || langField.includes(token))) return true;
+        return false;
+      }
       for (const p of preferLangs) {
-        const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
+        if (!p) continue;
+        const found = tr.find((t: any) => trMatchesToken(t, p));
         if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; pickedSource = 'translation'; break; }
       }
       if (!preferred) {
-        const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
+        const en = tr.find((t: any) => trMatchesToken(t, 'en'));
         if (en) { preferred = en.name || en.title || en.translation; pickedSource = 'translation'; }
       }
     } else if (typeof tr === 'object') {
       for (const p of preferLangs) {
-        if (tr[p]) {
-          preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation);
-          pickedSource = 'translation';
-          break;
+        if (!p) continue;
+        const keyMatch = Object.keys(tr || {}).find(k => k.toString().toLowerCase() === p || k.toString().toLowerCase().startsWith(p));
+        if (keyMatch) {
+          const val = tr[keyMatch];
+          preferred = (typeof val === 'string') ? val : (val && (val.name || val.title || val.translation));
+          if (preferred) { pickedSource = 'translation'; break; }
         }
       }
       if (!preferred) {

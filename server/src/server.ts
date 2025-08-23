@@ -568,9 +568,22 @@ async function bootstrap() {
       if (!seriesId) return null;
       const ep = eps && eps.length ? eps[0] : 1;
       try {
-        // First, try to look up by the provided season/episode (aired order)
+        // Use the new helper that prefers translations per settings and will
+        // fetch full episode details when required. This ensures preview uses
+        // the same language selection logic as /api/episode-title.
+        try {
+          const settings = loadSettings();
+          const lang = settings && (settings as any).tvdbLanguage ? String((settings as any).tvdbLanguage) : undefined;
+          const res = await getEpisodePreferredTitle(Number(seriesId), Number(season ?? 1), Number(ep), lang);
+          if (res && res.title) return res.title;
+        } catch (e) {
+          // fall back to older lookup strategies
+        }
+
+        // Fallback: try to look up by the provided season/episode (aired order)
         const data = await getEpisodeByAiredOrder(Number(seriesId), Number(season ?? 1), Number(ep));
         if (data) return (data as any)?.name || (data as any)?.episodeName || null;
+
         // If not found, maybe the provided episode number was an absolute number.
         // Ask TVDB to map absolute->aired and use the mapped result if available.
         try {

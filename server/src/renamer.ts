@@ -445,16 +445,18 @@ export async function finalizePlan(p: RenamePlan) {
                   const epn = Number(epNumMatch[2]);
                   try {
                     const s = await getSeries(Number(p.meta.tvdbId));
-                    // fetch episode by aired order if available
-                    const ep = await getEpisodeByAiredOrder(Number(p.meta.tvdbId), season, epn);
-                    const tvdbTitle = ep?.name || ep?.episodeName || undefined;
-                    if (tvdbTitle) {
-                      // Rebuild metadataTitle using TVDB-provided episode title
-                      const newMetadataTitle = `${seriesPart} - ${codePart} - ${String(tvdbTitle)}`;
-                      p.meta.metadataTitle = newMetadataTitle;
-                      // update newPath filename to match
-                      const dir = path.dirname(String(newPath));
-                      newPath = path.join(dir, newMetadataTitle + ext);
+                    // fetch episode preferred title (respecting settings tvdbLanguage)
+                      try {
+                        const _res = await (await import('./tvdb.js')).getEpisodePreferredTitle(Number(p.meta.tvdbId), season, epn, (loadSettings() as any).tvdbLanguage);
+                        const tvdbTitle = _res && typeof _res === 'object' ? (_res as any).title : null;
+                        if (tvdbTitle) {
+                          const newMetadataTitle = `${seriesPart} - ${codePart} - ${String(tvdbTitle)}`;
+                          p.meta.metadataTitle = newMetadataTitle;
+                          const dir = path.dirname(String(newPath));
+                          newPath = path.join(dir, newMetadataTitle + ext);
+                        }
+                      } catch (e) {
+                      // ignore episode fetch errors
                     }
                   } catch (e) {
                     // ignore TVDB fetch errors and keep the original metadataTitle
