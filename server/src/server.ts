@@ -214,6 +214,31 @@ async function bootstrap() {
     }
   }
 
+  // Choose a TVDB candidate conservatively: prefer candidates that clearly
+  // match the parsed/local title or share the same year or have reasonable
+  // token overlap. This avoids adopting unrelated results whose names are
+  // superficially similar (e.g. generic titles returned by search).
+  function pickTvdbCandidate(parsedName: string | undefined, inferredYear: number | undefined, results: any[]): any | null {
+    if (!Array.isArray(results) || results.length === 0) return null;
+    const clean = (s: any) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const pn = clean(parsedName || '');
+  // try to find a candidate that contains or is contained by the parsed name and prefers the inferred year
+    for (const r of results) {
+      try {
+        const cn = clean(r.name || r.title || '');
+        if (!cn) continue;
+        if (pn && (cn.includes(pn) || pn.includes(cn))) return r;
+        if (inferredYear && r.year && Number(r.year) === Number(inferredYear)) return r;
+        const pTokens = pn ? pn.split(' ') : [];
+        const cTokens = cn.split(' ');
+        const common = pTokens.filter(t => t && cTokens.includes(t));
+        // if a moderate fraction of tokens overlap, accept
+        if (pTokens.length && common.length >= Math.min(3, Math.max(1, Math.floor(pTokens.length / 2)))) return r;
+      } catch (e) { /* ignore per-candidate errors */ }
+    }
+    return null;
+  }
+
   // Normalize plans for preview responses: call the canonical finalizer
   // used during apply so preview paths exactly match the real output.
   async function normalizePlansForPreview(plans: any[]) {
@@ -564,9 +589,8 @@ async function bootstrap() {
         if (!match.id) {
           try {
             const results = await searchTVDB('movie', sel.match.name, sel.match.year);
-            if (Array.isArray(results) && results.length) {
-              match = results[0];
-            }
+            const selc = pickTvdbCandidate(sel.match.name, sel.match.year, results);
+            if (selc) match = selc;
           } catch (e) {}
         }
         // If we have a TVDB id, fetch canonical info (name/year) so preview shows
@@ -633,8 +657,9 @@ async function bootstrap() {
         if (!match.year && sel.match.year) match.year = sel.match.year;
         try {
           const results = await searchTVDB('series', sel.match.name, sel.match.year);
-          if (Array.isArray(results) && results.length) {
-            match = results[0];
+          const selc = pickTvdbCandidate(sel.match.name, sel.match.year, results);
+          if (selc) {
+            match = selc;
             if (!match.year) match.year = sel.match.year ?? undefined;
           }
         } catch (e) {}
