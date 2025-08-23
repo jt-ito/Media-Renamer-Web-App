@@ -15,9 +15,14 @@ const ABSOLUTE_HINT = /\b(OVA|OAD|NCOP|NCED|SP|Special)\b/i;
 const FANSUB_BRACKETS = /\[[^\]]+\]/g;
 const CURLY = /\{[^}]+\}/g;
 const PAREN_MISC = /\((?!19\d{2}|20\d{2}|21\d{2})[^)]+\)/g;
-const EXTENDED_TAGS = /\b(REMUX|REMASTERED|EXTENDED|UNCUT|IMAX|PROPER|REAL|REPACK|INTERNAL)\b/ig;
+const EXTENDED_TAGS = /\b(REMUX|REMASTERED|EXTENDED|IMAX|PROPER|REAL|REPACK|INTERNAL)\b/ig;
 const RES_TAGS = /\b(480p|720p|1080p|2160p|4K)\b/i;
-const CODECS = /\b(x264|x265|h264|HEVC|AVC|AAC|AC3)\b/ig;
+// wider codec patterns to catch forms like H.264, x.264, AAC2.0, etc.
+const CODECS = /\b(x\.?264|x\.?265|h\.?264|h\.?265|hevc|avc|aac2?\.?0?|aac|ac3)\b/ig;
+// release/distribution tags like WEB-DL, WEBRip, HDTV, BluRay
+const RELEASE_TAGS = /\b(BluRay|Blu-ray|BDRip|WEB[-_.]?DL|WEB[-_.]?Rip|WEB|HDTV|DVDRip|HDRip|BRRip|CAM|SCR|TC|TS)\b/ig;
+// miscellaneous common noise tokens
+const MISC_TAGS = /\b(UNCENSORED|UNCUT|DUAL|VIDEO|AUDIO|ENG|JPN|JP|OV|SUB|SUBBED|DUBBED|ISO|TOONSHUB)\b/ig;
 const TRAILING_GROUP = /(?:[-_.] ?[A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,})?)$/;
 
 function norm(s: string) {
@@ -31,6 +36,8 @@ function stripNoise(s: string) {
   .replace(EXTENDED_TAGS, ' ')
   .replace(RES_TAGS, ' ')
   .replace(CODECS, ' ')
+  .replace(RELEASE_TAGS, ' ')
+  .replace(MISC_TAGS, ' ')
   .replace(TRAILING_GROUP, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
