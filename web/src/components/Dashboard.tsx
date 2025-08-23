@@ -48,6 +48,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const scanItemsRef = useRef(scanItems);
   const observerRef = useRef<IntersectionObserver | null>(null);
   const shownLibrariesRef = useRef<typeof shownLibraries | null>(null);
+  // avoid duplicating immediate fetches for the same visible item
+  const inProgressImmediateRef = useRef(new Set<string>());
   // keep track of which items are currently visible in the viewport
   const visibleSetRef = useRef(new Set<string>());
   // pending updates for items that were fetched while visible — apply when they leave view
@@ -132,7 +134,39 @@ export default function Dashboard({ buttons }: DashboardProps) {
           if (e.isIntersecting) {
             // mark visible and prioritize scanning (silent so UI fetching indicator is not shown)
             visibleSetRef.current.add(key);
-            enqueueScan(libId, itemId, true, true);
+            // Try to perform an immediate, silent fetch for visible items so they hit the API right away.
+            try {
+              const libs = scanItemsRef.current || {};
+              const items = libs[libId] || [];
+              const it = items.find((x: any) => String(x.id) === String(itemId));
+              if (it) {
+                const norm = it.path ? normalizePath(it.path) : null;
+                if (norm && scannedPathsRef.current.has(norm)) {
+                  // already scanned
+                } else if (!inProgressImmediateRef.current.has(key)) {
+                  inProgressImmediateRef.current.add(key);
+                  // call fetch immediately (silent); do not enqueue to avoid duplicates
+                  (async () => {
+                    try {
+                      const libObj = (shownLibrariesRef.current || []).find((l:any) => l.id === libId) as any || { id: libId };
+                      // update last activity timestamp
+                      try { lastActivityRef.current = Date.now(); } catch {}
+                      await fetchEpisodeTitleIfNeeded(libObj, it, { silent: true });
+                    } catch (e) {
+                      // ignore
+                    } finally {
+                      inProgressImmediateRef.current.delete(key);
+                    }
+                  })();
+                }
+              } else {
+                // fallback to enqueue when we don't have the item object available yet
+                enqueueScan(libId, itemId, true, true);
+              }
+            } catch (e) {
+              // fallback to enqueue on any error
+              enqueueScan(libId, itemId, true, true);
+            }
           } else {
             // left view: remove from visible set and, if we have a pending update, apply it now
             visibleSetRef.current.delete(key);
