@@ -527,11 +527,12 @@ async function bootstrap() {
     const season = Number(q.season);
     const ep = Number(q.episode);
     try {
-      const title = await getEpisodePreferredTitle(sId, season, ep);
-      return { title: title || null };
+      const res = await getEpisodePreferredTitle(sId, season, ep);
+      if (res && typeof res === 'object') return { title: res.title || null, source: res.source || 'name' };
+      return { title: res || null, source: 'name' };
     } catch (e) {
       const data = await getEpisodeByAiredOrder(sId, season, ep);
-      return { title: (data as any)?.name || (data as any)?.episodeName || null };
+      return { title: (data as any)?.name || (data as any)?.episodeName || null, source: 'name' };
     }
   });
 

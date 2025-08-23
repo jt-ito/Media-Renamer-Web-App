@@ -46,19 +46,22 @@ export default function Dashboard({ buttons }: DashboardProps) {
   // Auto-fetch episode titles for items as they become visible
   useEffect(() => {
     if (typeof window === 'undefined' || !(window as any).IntersectionObserver) return;
+    const autoFetched = new Set<string>();
     const observer = new IntersectionObserver((entries) => {
       for (const e of entries) {
         try {
           if (e.isIntersecting) {
             const id = (e.target as HTMLElement).getAttribute('data-item-id');
-            if (id) {
-              for (const libId of Object.keys(scanItems || {})) {
-                const found = (scanItems[libId] || []).find((it: any) => it.id === id);
-                if (found) {
-                  fetchEpisodeTitleIfNeeded({ id: libId, name: '' } as any, found).catch(() => {});
-                  autoPreview({ id: libId, name: '' } as any, found).catch(() => {});
-                  break;
-                }
+            if (!id || autoFetched.has(id)) continue;
+            for (const libId of Object.keys(scanItems || {})) {
+              const found = (scanItems[libId] || []).find((it: any) => it.id === id);
+              if (found) {
+                // mark as attempted so we don't loop while visible
+                autoFetched.add(id);
+                fetchEpisodeTitleIfNeeded({ id: libId, name: '' } as any, found).catch(() => {});
+                // Request auto-preview for this item but don't await
+                autoPreview({ id: libId, name: '' } as any, found).catch(() => {});
+                break;
               }
             }
           }
@@ -434,7 +437,9 @@ export default function Dashboard({ buttons }: DashboardProps) {
       const ej = await eres.json();
   debug('episode title response', ej);
       const title = ej.title || null;
+      const source = ej.source || null;
       if (title) {
+        debug('episode title chosen', title, 'source=', source);
         // merge back into item inferred
         const newInferred = { ...inf, episode_title: title };
         // update parsedName if desired

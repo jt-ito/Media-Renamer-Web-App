@@ -141,7 +141,13 @@ export async function getEpisodePreferredTitle(seriesId: number, season: number,
   const m = await getEpisodeByAiredOrder(seriesId, season, episode);
   if (!m) return null;
   const picked = pickPreferredEpisodeName(m);
-  return picked || (m.name || m.episodeName || null);
+  // determine source for diagnostics
+  let source = 'name';
+  try {
+    if (m.translations && picked && String(picked) !== String(m.name)) source = 'translation';
+    else source = 'name';
+  } catch {}
+  return { title: (picked || (m.name || m.episodeName || null)), source };
 }
 
 export async function mapAbsoluteToAired(seriesId: number, abs: number[]) {
