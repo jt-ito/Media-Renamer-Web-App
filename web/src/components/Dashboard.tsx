@@ -41,7 +41,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [searchQuery, setSearchQuery] = useState('');
 
   // --- Background scanning queue (visible-first, rate-limited) ---
-  type ScanQueueItem = { libId: string; itemId: string };
+  type ScanQueueItem = { libId: string; itemId: string; silent?: boolean };
   const scanQueueRef = useRef<ScanQueueItem[]>([]);
   const scanQueuedSetRef = useRef(new Set<string>());
   const isProcessingRef = useRef(false);
@@ -66,7 +66,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
 
-  const enqueueScan = useCallback((libId: string, itemId: string, front = false) => {
+  const enqueueScan = useCallback((libId: string, itemId: string, front = false, silent = false) => {
   // update last activity (user triggered)
   try { lastActivityRef.current = Date.now(); } catch {}
   const key = `${libId}::${itemId}`;
@@ -78,7 +78,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   if (maybePath && scannedPathsRef.current.has(maybePath)) return;
   if (scanQueuedSetRef.current.has(key)) return;
   scanQueuedSetRef.current.add(key);
-    const entry = { libId, itemId } as ScanQueueItem;
+  const entry = { libId, itemId, silent } as ScanQueueItem;
     if (front) scanQueueRef.current.unshift(entry);
     else scanQueueRef.current.push(entry);
     // kick processing
@@ -94,14 +94,14 @@ export default function Dashboard({ buttons }: DashboardProps) {
       const items = libs[next.libId] || [];
           const item = items.find((it: any) => String(it.id) === String(next.itemId));
           if (item) {
-            try {
+              try {
               // find lib object from shownLibraries (best-effort)
         const libObj = (shownLibrariesRef.current || []).find((l:any) => l.id === next.libId) as any;
               if (libObj) {
-                await fetchEpisodeTitleIfNeeded(libObj, item);
+                await fetchEpisodeTitleIfNeeded(libObj, item, { silent: !!next.silent });
               } else {
                 // fallback: construct minimal lib object
-                await fetchEpisodeTitleIfNeeded({ id: next.libId } as any, item);
+                await fetchEpisodeTitleIfNeeded({ id: next.libId } as any, item, { silent: !!next.silent });
               }
             } catch (e) {
               // ignore per-item errors
@@ -130,9 +130,9 @@ export default function Dashboard({ buttons }: DashboardProps) {
           if (!itemId || !libId) continue;
           const key = `${libId}::${itemId}`;
           if (e.isIntersecting) {
-            // mark visible and prioritize scanning
+            // mark visible and prioritize scanning (silent so UI fetching indicator is not shown)
             visibleSetRef.current.add(key);
-            enqueueScan(libId, itemId, true);
+            enqueueScan(libId, itemId, true, true);
           } else {
             // left view: remove from visible set and, if we have a pending update, apply it now
             visibleSetRef.current.delete(key);
@@ -444,8 +444,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
                 const key = `${libId}::${it.id}`;
                 if (!path) continue;
                 if (scannedPathsRef.current.has(path)) continue;
-                // Enqueue without front prioritization; idle worker should be quiet
-                enqueueScan(libId, it.id, false);
+                // Enqueue without front prioritization; idle worker should be quiet (silent)
+                enqueueScan(libId, it.id, false, true);
                 // mark path immediately to avoid re-enqueue races
                 scannedPathsRef.current.add(path);
                 try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
@@ -593,7 +593,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
     }
   }
 
-  async function fetchEpisodeTitleIfNeeded(lib: Library, item: any) {
+  async function fetchEpisodeTitleIfNeeded(lib: Library, item: any, opts?: { silent?: boolean }) {
     const key = item.id;
     if (!item?.inferred) return;
     const inf = item.inferred;
@@ -601,7 +601,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
   if (ep == null) return null;
   debug('fetchEpisodeTitleIfNeeded called', lib.id, key, 'ep=', ep);
     // avoid duplicate fetches
-    setFetchingEpisodeMap(m => ({ ...m, [key]: true }));
+    const silent = !!(opts && opts.silent);
+    if (!silent) setFetchingEpisodeMap(m => ({ ...m, [key]: true }));
   try {
   const seriesName = inf.title || (inf.parsedName ? String(inf.parsedName).split(' - ')[0] : '');
       if (!seriesName) return;
@@ -626,7 +627,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
       const ej = await eres.json();
   debug('episode title response', ej);
       const title = ej.title || null;
-      if (title) {
+  if (title) {
         // merge back into item inferred
         const newInferred = { ...inf, episode_title: title };
         // update parsedName if desired
@@ -639,9 +640,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
         const updatedItem = { ...item, inferred: newInferred };
         const globalKey = `${lib.id}::${key}`;
         const normPath = item?.path ? normalizePath(item.path) : null;
-        if (visibleSetRef.current.has(globalKey)) {
-          // keep in-memory pending update; will be applied when item leaves view
-          pendingUpdatesRef.current.set(globalKey, updatedItem);
+        if (silent) {
+          // For silent scans, persist the update but do not apply UI changes or show fetching indicators
           if (normPath) {
             scannedUpdatesRef.current.set(normPath, updatedItem);
             scannedPathsRef.current.add(normPath);
@@ -649,12 +649,23 @@ export default function Dashboard({ buttons }: DashboardProps) {
             try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
           }
         } else {
-          setScanItems(s => ({ ...s, [lib.id]: (s[lib.id] || []).map((it: any) => it.id === key ? updatedItem : it) }));
-          if (normPath) {
-            scannedUpdatesRef.current.set(normPath, updatedItem);
-            scannedPathsRef.current.add(normPath);
-            try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
-            try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+          if (visibleSetRef.current.has(globalKey)) {
+            // keep in-memory pending update; will be applied when item leaves view
+            pendingUpdatesRef.current.set(globalKey, updatedItem);
+            if (normPath) {
+              scannedUpdatesRef.current.set(normPath, updatedItem);
+              scannedPathsRef.current.add(normPath);
+              try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
+              try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+            }
+          } else {
+            setScanItems(s => ({ ...s, [lib.id]: (s[lib.id] || []).map((it: any) => it.id === key ? updatedItem : it) }));
+            if (normPath) {
+              scannedUpdatesRef.current.set(normPath, updatedItem);
+              scannedPathsRef.current.add(normPath);
+              try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
+              try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+            }
           }
         }
         return updatedItem;
@@ -662,7 +673,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
     } catch (err) {
     debug('fetchEpisodeTitleIfNeeded error', err);
     } finally {
-      setFetchingEpisodeMap(m => { const c = { ...m }; delete c[key]; return c; });
+      if (!silent) setFetchingEpisodeMap(m => { const c = { ...m }; delete c[key]; return c; });
     }
     return null;
   }
