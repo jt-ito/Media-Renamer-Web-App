@@ -14,6 +14,9 @@ export function invalidateTVDBToken() {
   lastKey = null;
 }
 
+// ISO-639-3 mappings for common languages we request from TVDB
+const ISO3MAP: Record<string,string> = { en: 'eng', ja: 'jpn', fr: 'fra', zh: 'zho' };
+
 async function ensureToken() {
   const now = Date.now();
   if (token && now < tokenExp - 60_000) return token;
@@ -41,10 +44,12 @@ async function ensureToken() {
   return token!;
 }
 
-async function tvdb(path: string) {
+async function tvdb(path: string, preferredLang?: string) {
   const t = await ensureToken();
-  try { log('debug', `tvdb: GET ${path}`); } catch {}
-  const res = await fetch(`https://api4.thetvdb.com/v4${path}`, { headers: { Authorization: `Bearer ${t}` } });
+  try { log('debug', `tvdb: GET ${path} lang=${preferredLang||''}`); } catch {}
+  const headers: any = { Authorization: `Bearer ${t}` };
+  if (preferredLang) headers['Accept-Language'] = preferredLang;
+  const res = await fetch(`https://api4.thetvdb.com/v4${path}`, { headers });
   if (!res.ok) {
     try { log('error', `TVDB ${path} failed: ${res.status}`); } catch {}
     throw new Error(`TVDB ${path} failed: ${res.status}`);
@@ -56,9 +61,13 @@ async function tvdb(path: string) {
 }
 
 export async function searchTVDB(type: MediaType, query: string, year?: number): Promise<MatchCandidate[]> {
+  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
   const q = new URLSearchParams({ q: query, type });
   if (year) q.set('year', String(year));
-  const js: any = await tvdb(`/search?${q}`);
+  // Ask TVDB for results in the user's preferred language when possible.
+  q.set('language', settingsLang);
+  const js: any = await tvdb(`/search?${q}`, settingsLang);
   try { log('debug', `searchTVDB: query=${query} year=${year} results=${(js.data||[]).length}`); } catch {}
   return (js.data || []).map((d: any) => {
     // Determine the TVDB id and a readable name
@@ -99,178 +108,133 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
 }
 
 export async function getEpisodeByAiredOrder(seriesId: number, season: number, episode: number) {
-  const ep: any = await tvdb(`/series/${seriesId}/episodes/default?page=0&season=${season}`);
+  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
+  const listLang = ISO3MAP[settingsLang] || settingsLang;
+  const ep: any = await tvdb(`/series/${seriesId}/episodes/default?page=0&season=${season}&language=${encodeURIComponent(listLang)}`, settingsLang);
   const match = (ep.data?.episodes || []).find((e: any) => e.number === episode || e.airedEpisodeNumber === episode);
+  // Deterministic fetch: try the preferred language first (ISO-639-3), then English, then romaji.
+  // Prefer translations endpoint with language as path segment, then the episode resource with language
+  // query. If a translation is returned, use it and return the episode object.
+  try {
+    if (match) {
+      try { log('debug', `getEpisodeByAiredOrder: found match id=${match.id} number=${match.number} name=${String(match.name||'').slice(0,80)}`); } catch {}
+      const prefer = [settingsLang, 'eng', 'romaji'];
+      for (const p of prefer) {
+        const iso = ISO3MAP[p] || p;
+        try { log('debug', `getEpisodeByAiredOrder: trying translation for id=${match.id} langHint=${p} iso=${iso}`); } catch {}
+        // Try translations/{iso}
+        const tr = await tvdb(`/episodes/${match.id}/translations/${encodeURIComponent(iso)}`, p).catch(()=>null);
+        try { log('debug', `getEpisodeByAiredOrder: translations/${iso} response for ${match.id}: ${JSON.stringify(tr?.data || tr).slice(0,500)}`); } catch {}
+        if (tr && tr.data) {
+          // tr.data may be an object with name/overview or a wrapper
+          const maybe = Array.isArray(tr.data.translations) ? tr.data.translations[0] : (tr.data.name || tr.data.title || tr.data.translation ? tr.data : null);
+          const name = maybe && (maybe.name || maybe.title || maybe.translation);
+          if (name) { match.name = name; try { match._pickedNameSource = 'translation'; } catch {} ; break; }
+        }
+        // Fallback: request the episode resource with a language hint
+        try { log('debug', `getEpisodeByAiredOrder: trying episode resource lang=${p} iso=${iso} for id=${match.id}`); } catch {}
+        const epRes = await tvdb(`/episodes/${match.id}?language=${encodeURIComponent(iso)}`, p).catch(()=>null);
+        try { log('debug', `getEpisodeByAiredOrder: episode ${match.id} lang=${p} fallback response: ${JSON.stringify(epRes?.data || epRes).slice(0,500)}`); } catch {}
+        const got = epRes && (epRes.data || epRes);
+        const epName = got && (got.name || got.title || got.translation);
+        if (epName) { match.name = epName; try { match._pickedNameSource = 'translation'; } catch {} ; break; }
+      }
+      // Last resort: try the local helper which checks in-object translations/aliases
+      if (!match.name) {
+        try { log('debug', `getEpisodeByAiredOrder: no translation found, falling back to ensureEpisodePreferredName for ${match.id}`); } catch {}
+        await ensureEpisodePreferredName(match, settingsLang).catch(()=>{});
+      }
+    }
+  } catch (e) { try { log('error', `getEpisodeByAiredOrder: unexpected error: ${String(e)}`); } catch {} }
   return match;
 }
 
-// Pick a preferred episode title (translations -> fallback to name/episodeName)
-function pickPreferredEpisodeName(e: any, langOverride?: string) {
-  if (!e) return undefined;
-  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
-  const rawRequested = (langOverride || settingsLocal.tvdbLanguage || 'en').toString() || 'en';
-
-  // Normalize user-provided language strings into canonical tokens we can match
-  function normalizeLang(s: string|undefined|null) {
-    if (!s) return '';
-    const t = String(s).toLowerCase().trim();
-    if (!t) return '';
-    // common mappings
-    if (t === 'romaji' || t === 'ja-romaji' || t === 'ja-latn') return 'romaji';
-    if (t.startsWith('en') || t.includes('english')) return 'en';
-    if (t === 'eng') return 'eng';
-    if (t.startsWith('ja') || t === 'jpn' || t.includes('japanese')) return 'ja';
-    if (t.startsWith('zh') || t.includes('chinese') || t === 'chi') return 'zh';
-    // try to return two/three letter ISO-like tokens
-    return t;
-  }
-
-  const requested = normalizeLang(rawRequested);
-  const preferLangs = [requested, 'en', 'eng', 'romaji', 'ja', 'ja-latn', 'zh', 'zh-cn', 'zh-tw'];
-  const tr = e.translations || e.translatedNames || e.translationsMap;
-  try {
-    // Log a short summary for diagnostics
-    const summary = {
-      id: e.id || e.episodeId || undefined,
-      name: e.name || e.episodeName || e.title,
-      translations: Array.isArray(tr) ? tr.map((t:any)=> ({ language: t.language, k: t.iso_639_3 })) : (tr ? Object.keys(tr || {}) : undefined)
-    };
-    try { log('debug', `pickPreferredEpisodeName: summary=${JSON.stringify(summary).slice(0,800)}`); } catch {}
-  } catch (e) {}
-  let preferred: string | undefined;
-  if (tr) {
-    // Helper: test whether a translation entry matches a normalized token
-    function trMatchesToken(tEntry: any, token: string) {
-      if (!tEntry || !token) return false;
-      const langField = (tEntry.language || tEntry.lang || '').toString().toLowerCase();
-      const iso = (tEntry.iso_639_3 || '').toString().toLowerCase();
-      const nameLike = (tEntry.name || tEntry.title || tEntry.translation || '').toString();
-      if (!langField && !iso) return false;
-      if (token === 'romaji') {
-        // Some feeds mark romanized Japanese as 'ja-latn' or similar
-        if (langField.includes('romaji') || langField.includes('latn') || iso === 'rom') return true;
-      }
-      if (iso && iso === token) return true;
-      if (langField && (langField === token || langField.startsWith(token) || langField.includes(token))) return true;
-      return false;
-    }
-
-    if (Array.isArray(tr)) {
-      // prefer in order of preferLangs
-      for (const p of preferLangs) {
-        if (!p) continue;
-        const found = tr.find((t: any) => trMatchesToken(t, p));
-        if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
-      }
-      if (!preferred) {
-        const en = tr.find((t: any) => trMatchesToken(t, 'en'));
-        if (en) preferred = en.name || en.title || en.translation;
-      }
-    } else if (typeof tr === 'object') {
-      // object keyed by language tokens
-      for (const p of preferLangs) {
-        if (!p) continue;
-        // direct key match
-        const keyMatch = Object.keys(tr || {}).find(k => k.toString().toLowerCase() === p || k.toString().toLowerCase().startsWith(p));
-        if (keyMatch) {
-          const val = tr[keyMatch];
-          preferred = (typeof val === 'string') ? val : (val && (val.name || val.title || val.translation));
-          if (preferred) break;
-        }
-      }
-      if (!preferred) {
-        const keyEn = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
-        if (keyEn) preferred = (typeof tr[keyEn] === 'string') ? tr[keyEn] : (tr[keyEn].name || tr[keyEn].title || tr[keyEn].translation);
-      }
-    }
-  }
-  // fallback to name/episodeName
-  if (!preferred) preferred = e.name || e.episodeName || e.title || undefined;
-  try { log('debug', `pickPreferredEpisodeName: picked='${preferred}' for langOverride='${langOverride || ''}'`); } catch {}
-  return preferred;
-}
-
-export async function getEpisodePreferredTitle(seriesId: number, season: number, episode: number, lang?: string) {
-  const m = await getEpisodeByAiredOrder(seriesId, season, episode);
-  if (!m) return null;
-  try { log('info', `getEpisodePreferredTitle: series=${seriesId} season=${season} ep=${episode} requestedLang=${lang || ''} rawEpisodeHasTranslations=${!!(m && (m.translations||m.translatedNames||m.translationsMap))}`); } catch {}
-
-  // If the lightweight episode object doesn't include translations, request full episode details
-  let episodeObj = m;
-  if (!(m && (m.translations || m.translatedNames || m.translationsMap))) {
-    try {
-      const full = await tvdb(`/episodes/${m.id || m.episodeId || m.episode_id}`);
-      episodeObj = (full && full.data) ? full.data : full;
-      try { log('debug', `getEpisodePreferredTitle: fetched full episode object for id=${m.id||m.episodeId||m.episode_id}`); } catch {}
-    } catch (e) {
-      try { log('debug', `getEpisodePreferredTitle: could not fetch full episode object: ${String(e)}`); } catch {}
-    }
-  }
-
-  // Some TVDB responses provide only `nameTranslations` (array of language codes)
-  // on the episode object but not the actual translated strings. If we see
-  // language codes but no translation entries, attempt to fetch the
-  // translations endpoint for this episode so we can choose the requested
-  // language string (for example: 'eng'/'en' or 'romaji').
-  try {
-    const hasNameCodes = !!(episodeObj && (episodeObj.nameTranslations || episodeObj.name_translations));
-    const hasTranslationEntries = !!(episodeObj && (episodeObj.translations || episodeObj.translatedNames || episodeObj.translationsMap));
-    if (hasNameCodes && !hasTranslationEntries && (episodeObj.id || episodeObj.episodeId || episodeObj.episode_id)) {
-      try {
-        const tid = episodeObj.id || episodeObj.episodeId || episodeObj.episode_id;
-        const transRes = await tvdb(`/episodes/${tid}/translations`);
-        const transData = transRes && transRes.data ? transRes.data : transRes;
-        if (transData) {
-          // Normalize into an array of { language, name/title/translation }
-          let arr: any[] = [];
-          if (Array.isArray(transData)) arr = transData;
-          else if (transData.translations && Array.isArray(transData.translations)) arr = transData.translations;
-          else if (transData.data && Array.isArray(transData.data)) arr = transData.data;
-          // Map common shapes to a normalized translations array
-          const normalized = arr.map((t: any) => {
-            const language = (t.language || t.lang || t.iso_639_3 || t.iso || '').toString();
-            const name = (t.name || t.title || t.translation || t.value || (t.data && t.data.name) || null);
-            return { language, name, raw: t };
-          }).filter(Boolean);
-          if (normalized.length) {
-            try { episodeObj.translations = normalized; } catch {}
-            try { log('debug', `getEpisodePreferredTitle: fetched ${normalized.length} translation entries for episode id=${tid}`); } catch {}
-          }
-        }
-      } catch (e) {
-        try { log('debug', `getEpisodePreferredTitle: translations fetch failed for episode id=${episodeObj.id||episodeObj.episodeId||episodeObj.episode_id}: ${String(e)}`); } catch {}
-      }
-    }
-  } catch (e) { /* best-effort */ }
-
-  const picked = pickPreferredEpisodeName(episodeObj, lang);
-  // determine source for diagnostics
-  let source = 'name';
-  try {
-    if ((episodeObj.translations || episodeObj.translatedNames || episodeObj.translationsMap) && picked && String(picked) !== String(episodeObj.name)) source = 'translation';
-    else source = 'name';
-  } catch {}
-  try { log('info', `getEpisodePreferredTitle: chosen='${picked}' source=${source} series=${seriesId} s=${season} e=${episode}`); } catch {}
-  return { title: (picked || (episodeObj.name || episodeObj.episodeName || null)), source };
-}
-
 export async function mapAbsoluteToAired(seriesId: number, abs: number[]) {
-  const js: any = await tvdb(`/series/${seriesId}/episodes/default?page=0`);
+  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
+  const listLang = ISO3MAP[settingsLang] || settingsLang;
+  const js: any = await tvdb(`/series/${seriesId}/episodes/default?page=0&language=${encodeURIComponent(listLang)}`, settingsLang);
   const eps = js.data?.episodes || [];
   return abs.map(a => {
     const m = eps.find((e: any) => e.absoluteNumber === a) || eps.find((e:any)=> e.airedEpisodeNumber === a);
+    if (!m) return null;
+    try { /* best-effort: prefer translated name for each matched episode */
+      // ensure name is preferred language when possible
+      ensureEpisodePreferredName(m, settingsLang).catch(()=>{});
+    } catch (e) {}
     return m ? { season: m.airedSeason ?? m.seasonNumber, ep: m.airedEpisodeNumber ?? m.number, title: m.name || m.episodeName } : null;
   });
 }
 
+// Helper: ensure an episode object has a preferred human-friendly name
+async function ensureEpisodePreferredName(e: any, settingsLang: string) {
+  if (!e) return;
+  const prefer = [settingsLang, 'en', 'romaji'];
+  // If translations array exists, try to pick one locally first
+  if (Array.isArray(e.translations) && e.translations.length) {
+    for (const p of prefer) {
+      const found = e.translations.find((t: any) => (t.language && String(t.language||'').toLowerCase().startsWith(p)) || (t.iso_639_3 && String(t.iso_639_3||'').toLowerCase() === p));
+      if (found && (found.name || found.title || found.translation)) { e.name = found.name || found.title || found.translation; try { e._pickedNameSource = 'translation'; } catch {} ; return; }
+    }
+  }
+  // If server response lists available nameTranslations, ask TVDB translations endpoint
+  const nt = e.nameTranslations || e.nameTranslation || null;
+  if (nt && Array.isArray(nt)) {
+    // Try the translations endpoint first (may fail for some records), then
+    // as a fallback request the episode resource with a language hint that
+    // TVDB seems to accept (they often use ISO-639-3 codes like 'eng'/'jpn').
+    // Try language-specific translations endpoints (e.g. /translations/eng)
+    for (const p of prefer) {
+  const iso = ISO3MAP[p] || p;
+      const trJs: any = await tvdb(`/episodes/${e.id}/translations/${encodeURIComponent(iso)}`, p).catch(()=>null);
+      try { log('debug', `ensureEpisodePreferredName: translations/${iso} response for ${e.id}: ${JSON.stringify(trJs?.data || trJs).slice(0,1000)}`); } catch {}
+      if (trJs && trJs.data) {
+        const list = Array.isArray(trJs.data.translations) ? trJs.data.translations : (Array.isArray(trJs.data) ? trJs.data : (trJs.data ? [trJs.data] : []));
+        const found = list.find((t: any) => (t.language && String(t.language||'').toLowerCase().startsWith(p)) || (t.iso_639_3 && String(t.iso_639_3||'').toLowerCase() === p));
+        if (found && (found.name || found.title || found.translation)) { e.name = found.name || found.title || found.translation; try { e._pickedNameSource = 'translation'; } catch {} ; return; }
+      }
+    }
+    // Fallback: try fetching the episode with a language query param using
+    // common ISO mappings (en->eng, ja->jpn, fr->fra).
+    const iso3map: any = { en: 'eng', ja: 'jpn', fr: 'fra', zh: 'zho' };
+      for (const p of prefer) {
+        const iso = iso3map[p] || p;
+        const epJs: any = await tvdb(`/episodes/${e.id}?language=${encodeURIComponent(iso)}`, p).catch(()=>null);
+        try { log('debug', `ensureEpisodePreferredName: episode ${e.id} lang=${p} fallback response: ${JSON.stringify(epJs?.data || epJs).slice(0,1000)}`); } catch {}
+        if (epJs && (epJs.data || epJs)) {
+          const got = (epJs.data && epJs.data.name) ? epJs.data : epJs;
+          const name = got.name || got.title || got.translation;
+          if (name) { e.name = name; try { e._pickedNameSource = 'translation'; } catch {} ; return; }
+        }
+      }
+  }
+}
+
 export async function getSeries(seriesId: number) {
-  const js: any = await tvdb(`/series/${seriesId}`);
+  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
+  // Request the series resource with the preferred language header/param so
+  // TVDB will return localized translations where available.
+  const js: any = await tvdb(`/series/${seriesId}?language=${encodeURIComponent(settingsLang)}`, settingsLang);
   try { log('debug', `getSeries: seriesId=${seriesId} keys=${Object.keys(js || {}).join(',')}`); } catch {}
   const d = js.data || js;
   try {
     // If we got a raw TVDB object, pick a preferred name and annotate so callers
     // receive the same preferred/annotated shape as searchTVDB produces.
     if (d) {
+      // If TVDB didn't include translations, try to fetch the translations
+      // endpoint explicitly (some TVDB responses omit the translations key).
+          try {
+            if (!d.translations || (Array.isArray(d.translations) && d.translations.length === 0)) {
+              const trJs: any = await tvdb(`/series/${seriesId}/translations`, settingsLang).catch(()=>null);
+              if (trJs && trJs.data) {
+                // merge translations into the object shape our picker expects
+                d.translations = trJs.data.translations || trJs.data || d.translations;
+              }
+            }
+          } catch(e) {}
+
       const picked = pickPreferredName(d);
       // ensure callers that read `name` get the preferred (English/alias)
       // display name rather than the raw localized `name` returned by TVDB.
@@ -316,54 +280,31 @@ function pickPreferredName(d: any) {
     return filtered[0].s;
   }
   // Avoid depending on the exact shape of the exported `Settings` type from
-  // `settings.ts`. Normalize the preferred language and build a prefer-list.
+  // `settings.ts` (some branches or CI snapshots may not include
+  // `tvdbLanguage`). Cast to a local, explicit shape that makes the
+  // optionality clear while keeping strict typing for the rest of this file.
   const settingsLocal = loadSettings() as { tvdbLanguage?: string };
-  function normalizeLang(s: string|undefined|null) {
-    if (!s) return '';
-    const t = String(s).toLowerCase().trim();
-    if (!t) return '';
-    if (t === 'romaji' || t === 'ja-romaji' || t === 'ja-latn') return 'romaji';
-    if (t.startsWith('en') || t.includes('english')) return 'en';
-    if (t === 'eng') return 'eng';
-    if (t.startsWith('ja') || t === 'jpn' || t.includes('japanese')) return 'ja';
-    if (t.startsWith('zh') || t.includes('chinese') || t === 'chi') return 'zh';
-    return t;
-  }
-  const settingsLang = normalizeLang(settingsLocal.tvdbLanguage || 'en');
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
   const tr = d.translations;
-  const preferLangs = [settingsLang, 'en', 'eng', 'romaji', 'ja', 'ja-latn', 'zh', 'zh-cn', 'zh-tw'];
+  const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
   let preferred: string | undefined;
   let pickedSource: string | undefined;
   if (tr) {
     if (Array.isArray(tr)) {
-      function trMatchesToken(tEntry: any, token: string) {
-        if (!tEntry || !token) return false;
-        const langField = (tEntry.language || tEntry.lang || '').toString().toLowerCase();
-        const iso = (tEntry.iso_639_3 || '').toString().toLowerCase();
-        if (token === 'romaji') {
-          if (langField.includes('romaji') || langField.includes('latn') || iso === 'rom') return true;
-        }
-        if (iso && iso === token) return true;
-        if (langField && (langField === token || langField.startsWith(token) || langField.includes(token))) return true;
-        return false;
-      }
       for (const p of preferLangs) {
-        if (!p) continue;
-        const found = tr.find((t: any) => trMatchesToken(t, p));
+        const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
         if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; pickedSource = 'translation'; break; }
       }
       if (!preferred) {
-        const en = tr.find((t: any) => trMatchesToken(t, 'en'));
+        const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
         if (en) { preferred = en.name || en.title || en.translation; pickedSource = 'translation'; }
       }
     } else if (typeof tr === 'object') {
       for (const p of preferLangs) {
-        if (!p) continue;
-        const keyMatch = Object.keys(tr || {}).find(k => k.toString().toLowerCase() === p || k.toString().toLowerCase().startsWith(p));
-        if (keyMatch) {
-          const val = tr[keyMatch];
-          preferred = (typeof val === 'string') ? val : (val && (val.name || val.title || val.translation));
-          if (preferred) { pickedSource = 'translation'; break; }
+        if (tr[p]) {
+          preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation);
+          pickedSource = 'translation';
+          break;
         }
       }
       if (!preferred) {

@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url';
 import { loadLibraries, saveLibraries } from './config.js';
 import { getLogs, log } from './logging.js';
 import { inferFromPath } from './parse.js';
-import { searchTVDB, getEpisodeByAiredOrder, mapAbsoluteToAired, invalidateTVDBToken, getSeries, getEpisodePreferredTitle } from './tvdb.js';
+import { searchTVDB, getEpisodeByAiredOrder, mapAbsoluteToAired, invalidateTVDBToken, getSeries } from './tvdb.js';
 import { Library, MediaType, RenamePlan, ScanItem } from './types.js';
 import { planEpisode, planMovie, applyPlans } from './renamer.js';
 import { initApproved, isApproved, markApproved, approvedList, unapproveLast } from './approved.js';
@@ -526,15 +526,8 @@ async function bootstrap() {
     const sId = Number(q.seriesId);
     const season = Number(q.season);
     const ep = Number(q.episode);
-    const lang = (q.lang || q.language || q.tvdbLanguage) ? String(q.lang || q.language || q.tvdbLanguage) : undefined;
-    try {
-      const res = await getEpisodePreferredTitle(sId, season, ep, lang);
-      if (res && typeof res === 'object') return { title: res.title || null, source: res.source || 'name' };
-      return { title: res || null, source: 'name' };
-    } catch (e) {
-      const data = await getEpisodeByAiredOrder(sId, season, ep);
-      return { title: (data as any)?.name || (data as any)?.episodeName || null, source: 'name' };
-    }
+    const data = await getEpisodeByAiredOrder(sId, season, ep);
+    return { title: (data as any)?.name || (data as any)?.episodeName || null };
   });
 
   app.get('/api/map-absolute', async (req) => {
@@ -568,22 +561,9 @@ async function bootstrap() {
       if (!seriesId) return null;
       const ep = eps && eps.length ? eps[0] : 1;
       try {
-        // Use the new helper that prefers translations per settings and will
-        // fetch full episode details when required. This ensures preview uses
-        // the same language selection logic as /api/episode-title.
-        try {
-          const settings = loadSettings();
-          const lang = settings && (settings as any).tvdbLanguage ? String((settings as any).tvdbLanguage) : undefined;
-          const res = await getEpisodePreferredTitle(Number(seriesId), Number(season ?? 1), Number(ep), lang);
-          if (res && res.title) return res.title;
-        } catch (e) {
-          // fall back to older lookup strategies
-        }
-
-        // Fallback: try to look up by the provided season/episode (aired order)
+        // First, try to look up by the provided season/episode (aired order)
         const data = await getEpisodeByAiredOrder(Number(seriesId), Number(season ?? 1), Number(ep));
         if (data) return (data as any)?.name || (data as any)?.episodeName || null;
-
         // If not found, maybe the provided episode number was an absolute number.
         // Ask TVDB to map absolute->aired and use the mapped result if available.
         try {

@@ -112,18 +112,34 @@ export function episodeOutputPath(
     }
     try {
       const audit = (s as any)?.extra?.audit;
+      const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+      const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
       // 1) if server already picked a translation/alias, use it
       const picked = (s as any)?.extra?.nameSource || (s as any)?._pickedNameSource;
       if (picked && (picked === 'translation' || picked === 'alias')) return String(s.name || '');
 
-      // 2) try audit translations (array)
+      // 2) try audit translations (array) - prefer user's language then english then romaji
       if (audit?.translations && Array.isArray(audit.translations)) {
+        const prefer = [settingsLang, 'en', 'romaji'];
+        for (const p of prefer) {
+          const found = audit.translations.find((t:any)=> t && String(t.language||'').toLowerCase().startsWith(p));
+          if (found && (found.name || found.title || found.translation)) return String(found.name || found.title || found.translation || '');
+        }
+        // as a fallback check for any english-ish entry
         const en = audit.translations.find((t:any)=> t && String(t.language||'').toLowerCase().startsWith('en'));
         if (en && (en.name || en.title)) return String(en.name || en.title || en.translation || '');
       }
 
       // 3) try aliases (object entries)
       if (audit?.aliases && Array.isArray(audit.aliases) && audit.aliases.length) {
+        // try to prefer alias matching user's language first
+        const preferAliasLangs = [settingsLang, 'en', 'romaji'];
+        if (typeof audit.aliases[0] === 'object') {
+          for (const p of preferAliasLangs) {
+            const found = (audit.aliases as any[]).find((a:any)=> (a.language && String(a.language||'').toLowerCase().startsWith(p)) || (a.iso_639_3 && String(a.iso_639_3||'').toLowerCase() === p));
+            if (found && (found.name || found.title || found.translation)) return String(found.name || found.title || found.translation || '');
+          }
+        }
         const best = pickBestAliasFromAudit(audit.aliases as any[]);
         if (best) return String(best);
       }
@@ -445,18 +461,16 @@ export async function finalizePlan(p: RenamePlan) {
                   const epn = Number(epNumMatch[2]);
                   try {
                     const s = await getSeries(Number(p.meta.tvdbId));
-                    // fetch episode preferred title (respecting settings tvdbLanguage)
-                      try {
-                        const _res = await (await import('./tvdb.js')).getEpisodePreferredTitle(Number(p.meta.tvdbId), season, epn, (loadSettings() as any).tvdbLanguage);
-                        const tvdbTitle = _res && typeof _res === 'object' ? (_res as any).title : null;
-                        if (tvdbTitle) {
-                          const newMetadataTitle = `${seriesPart} - ${codePart} - ${String(tvdbTitle)}`;
-                          p.meta.metadataTitle = newMetadataTitle;
-                          const dir = path.dirname(String(newPath));
-                          newPath = path.join(dir, newMetadataTitle + ext);
-                        }
-                      } catch (e) {
-                      // ignore episode fetch errors
+                    // fetch episode by aired order if available
+                    const ep = await getEpisodeByAiredOrder(Number(p.meta.tvdbId), season, epn);
+                    const tvdbTitle = ep?.name || ep?.episodeName || undefined;
+                    if (tvdbTitle) {
+                      // Rebuild metadataTitle using TVDB-provided episode title
+                      const newMetadataTitle = `${seriesPart} - ${codePart} - ${String(tvdbTitle)}`;
+                      p.meta.metadataTitle = newMetadataTitle;
+                      // update newPath filename to match
+                      const dir = path.dirname(String(newPath));
+                      newPath = path.join(dir, newMetadataTitle + ext);
                     }
                   } catch (e) {
                     // ignore TVDB fetch errors and keep the original metadataTitle

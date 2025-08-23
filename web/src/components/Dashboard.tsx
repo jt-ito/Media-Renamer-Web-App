@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import debug from '../lib/debug';
 
 type Library = {
@@ -30,7 +30,6 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [scanningAll, setScanningAll] = useState(false);
   const [scanSummary, setScanSummary] = useState<string | null>(null);
   const [tvdbKey, setTvdbKey] = useState<string | null>(null);
-  const [tvdbLanguage, setTvdbLanguage] = useState<string | null>(null);
   const [fetchingEpisodeMap, setFetchingEpisodeMap] = useState<Record<string, boolean>>({});
   const [scanningMap, setScanningMap] = useState<Record<string, boolean>>({});
   const [previewingMap, setPreviewingMap] = useState<Record<string, boolean>>({});
@@ -40,51 +39,6 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [bulkResults, setBulkResults] = useState<Record<string, any[]>>({});
   const [approved, setApproved] = useState<Record<string, any>>({});
   const [searchQuery, setSearchQuery] = useState('');
-
-  // refs map for observed items (used by IntersectionObserver below)
-  const itemRefs = useMemo(() => new Map<string, HTMLDivElement | null>(), []);
-
-  // Track which items we've already auto-fetched (persist across renders)
-  const autoFetchedRef = useRef<Set<string> | null>(null);
-  if (!autoFetchedRef.current) autoFetchedRef.current = new Set<string>();
-
-  // Auto-fetch episode titles for items as they become visible
-  useEffect(() => {
-    if (typeof window === 'undefined' || !(window as any).IntersectionObserver) return;
-    const autoFetched = autoFetchedRef.current!;
-    const observer = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        try {
-          if (e.isIntersecting) {
-            const id = (e.target as HTMLElement).getAttribute('data-item-id');
-            if (!id || autoFetched.has(id)) continue;
-            for (const libId of Object.keys(scanItems || {})) {
-              const found = (scanItems[libId] || []).find((it: any) => it.id === id);
-              if (found) {
-                // mark as attempted so we don't loop while visible
-                autoFetched.add(id);
-                // include preferred language when requesting episode title
-                const lang = tvdbLanguage || undefined;
-                fetchEpisodeTitleIfNeeded({ id: libId, name: '' } as any, found, lang).catch(() => {});
-                // Request auto-preview for this item but don't await
-                autoPreview({ id: libId, name: '' } as any, found).catch(() => {});
-                break;
-              }
-            }
-          }
-        } catch (err) { /* ignore */ }
-      }
-    }, { root: null, rootMargin: '200px', threshold: 0.01 });
-
-  try { const els = document.querySelectorAll('[data-item-id]'); els.forEach(el => observer.observe(el)); } catch (e) {}
-
-    const mo = new MutationObserver(() => {
-      try { const els = document.querySelectorAll('[data-item-id]'); els.forEach(el => observer.observe(el)); } catch {};
-    });
-    try { mo.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
-
-    return () => { try { observer.disconnect(); } catch {} try { mo.disconnect(); } catch {} };
-  }, [scanItems]);
 
   useEffect(() => {
     const load = async () => {
@@ -113,7 +67,6 @@ export default function Dashboard({ buttons }: DashboardProps) {
         if (r.ok) {
           const js = await r.json();
           setTvdbKey(js.tvdbKey ?? null);
-          setTvdbLanguage(js.tvdbLanguage ?? null);
         }
       } catch {}
       try {
@@ -290,10 +243,6 @@ export default function Dashboard({ buttons }: DashboardProps) {
       const data = await res.json();
       const items = data.items || [];
       setScanItems(s => ({ ...s, [lib.id]: items }));
-      // persist updated scan to server cache immediately
-      try {
-        await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...(scanItems || {}), [lib.id]: items }) });
-      } catch (e) { /* ignore persistence failures */ }
       // If the library is large, skip eager auto-preview to avoid hammering the client/network.
       const AUTO_PREVIEW_LIMIT = 30;
       try {
@@ -409,7 +358,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
     }
   }
 
-  async function fetchEpisodeTitleIfNeeded(lib: Library, item: any, lang?: string) {
+  async function fetchEpisodeTitleIfNeeded(lib: Library, item: any) {
     const key = item.id;
     if (!item?.inferred) return;
     const inf = item.inferred;
@@ -437,15 +386,12 @@ export default function Dashboard({ buttons }: DashboardProps) {
       const seriesId = results[0].id;
       const season = inf.season ?? 1;
   debug('fetching episode title for seriesId', seriesId, 'season', season, 'episode', ep);
-  const qparams = `seriesId=${encodeURIComponent(String(seriesId))}&season=${encodeURIComponent(String(season))}&episode=${encodeURIComponent(String(ep))}${lang?`&lang=${encodeURIComponent(String(lang))}`:''}`;
-  const eres = await fetch(`/api/episode-title?${qparams}`);
+      const eres = await fetch(`/api/episode-title?seriesId=${encodeURIComponent(String(seriesId))}&season=${encodeURIComponent(String(season))}&episode=${encodeURIComponent(String(ep))}`);
       if (!eres.ok) return;
       const ej = await eres.json();
   debug('episode title response', ej);
       const title = ej.title || null;
-      const source = ej.source || null;
       if (title) {
-        debug('episode title chosen', title, 'source=', source);
         // merge back into item inferred
         const newInferred = { ...inf, episode_title: title };
         // update parsedName if desired
@@ -775,7 +721,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
             itemsToShow.map(item => (
-            <div key={item.id} data-item-id={item.id} style={{ position: 'relative' }}>
+            <div key={item.id} style={{ position: 'relative' }}>
               {/* checkbox positioned per-item so it aligns with this specific row */}
               {selectMode && (
                 <div style={{ position: 'absolute', left: -56, top: '50%', transform: 'translateY(-50%)', width: 56, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
