@@ -1,60 +1,63 @@
 import path from 'path';
 import { log } from './logging.js';
 
-const YEAR_PAREN = /\((19\d{2}|20\d{2}|21\d{2})\)/;
-const YEAR_BARE = /\b(19\d{2}|20\d{2}|21\d{2})\b/;
-const SXXEXX_MULTI = /\bS(\d{1,2})E(\d{2})(?:E(\d{2}))*\b/i;
-const SXXEXX_SINGLE = /\bS(\d{1,2})E(\d{2})\b/i;
-const XXxYY = /\b(\d{1,2})x(\d{2})\b/i;
-const E_ONLY = /\bE(\d{2})\b/i;
-const EP_RANGE = /E(\d{1,3})-(\d{1,3})/i;
-const SEASON_WORD = /\bSeason[\s._-]*(\d{1,2})\b/i;
-const EPISODE_WORD = /\bEpisode[\s._-]*(\d{1,3})\b/i;
-const MULTI_RANGE = /\b(\d{1,3})-(\d{1,3})\b/;
-const ABSOLUTE_HINT = /\b(OVA|OAD|NCOP|NCED|SP|Special)\b/i;
-const FANSUB_BRACKETS = /\[[^\]]+\]/g;
-const CURLY = /\{[^}]+\}/g;
-const PAREN_MISC = /\((?!19\d{2}|20\d{2}|21\d{2})[^)]+\)/g;
-const EXTENDED_TAGS = /\b(REMUX|REMASTERED|EXTENDED|IMAX|PROPER|REAL|REPACK|INTERNAL)\b/ig;
-const RES_TAGS = /\b(480p|720p|1080p|2160p|4K)\b/i;
-// wider codec patterns to catch forms like H.264, x.264, AAC2.0, etc.
-const CODECS = /\b(x\.?264|x\.?265|h\.?264|h\.?265|hevc|avc|aac2?\.?0?|aac|ac3)\b/ig;
-// release/distribution tags like WEB-DL, WEBRip, HDTV, BluRay
-const RELEASE_TAGS = /\b(BluRay|Blu-ray|BDRip|WEB[-_.]?DL|WEB[-_.]?Rip|WEB|HDTV|DVDRip|HDRip|BRRip|CAM|SCR|TC|TS)\b/ig;
-// miscellaneous common noise tokens
-const MISC_TAGS = /\b(UNCENSORED|UNCUT|DUAL|VIDEO|AUDIO|ENG|JPN|JP|OV|SUB|SUBBED|DUBBED|ISO|TOONSHUB)\b/ig;
-const TRAILING_GROUP = /(?:[-_.] ?[A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,})?)$/;
+// This parser uses a modular, score-based approach that generates candidate
+// interpretations and ranks them. The goal is high robustness across Windows,
+// macOS, Linux filename styles and many real-world release tags.
 
-function norm(s: string) {
+const YEAR_RE = /(19\d{2}|20\d{2}|21\d{2})/;
+const SXXEXX = /\bS(\d{1,2})E(\d{1,3})\b/i;
+const SXXEXX_ALL = /\bS(\d{1,2})E(\d{2,3})(?:E(\d{2,3}))*\b/ig;
+const XXxYY = /\b(\d{1,2})x(\d{2,3})\b/i;
+const EP_RANGE = /\bE(\d{1,3})-(\d{1,3})\b/i;
+const E_ONLY = /\bE(\d{1,3})\b/i;
+const ABSOLUTE_HINT = /\b(OVA|OAD|SP|Special|SPECIAL|OVA:?)\b/i;
+
+// Noise tokens to remove/ignore
+const NOISE_RE_LIST: RegExp[] = [
+  /\[[^\]]+\]/g, // [Fansub]
+  /\{[^}]+\}/g,
+  /\((?!19\d{2}|20\d{2}|21\d{2})[^)]+\)/g, // parenthesis but not years
+  /\b(480p|720p|1080p|2160p|4k|4K)\b/ig,
+  /\b(x\.?264|x\.?265|h\.?264|h\.?265|hevc|avc|aac2?\.?0?|aac|ac3)\b/ig,
+  /\b(BluRay|Blu-ray|BDRip|WEB[-_.]?DL|WEB[-_.]?Rip|WEB|HDTV|DVDRip|HDRip|BRRip|CAM|SCR|TC|TS)\b/ig,
+  /\b(UNCENSORED|UNCUT|DUAL|VIDEO|AUDIO|ENG|JPN|JP|OV|SUB|SUBBED|DUBBED|ISO)\b/ig,
+  /(?:-|_|\.){1,}/g
+];
+
+function normalizeSeparators(s: string) {
   return s.replace(/[._]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 }
+
 function stripNoise(s: string) {
-  // Remove known noise tokens first (so we catch forms like H.264, x264, AAC2.0)
-  return (s || '')
-    .replace(FANSUB_BRACKETS, ' ')
-    .replace(CURLY, ' ')
-    .replace(PAREN_MISC, ' ')
-    .replace(EXTENDED_TAGS, ' ')
-    .replace(RES_TAGS, ' ')
-    .replace(CODECS, ' ')
-    .replace(RELEASE_TAGS, ' ')
-    .replace(MISC_TAGS, ' ')
-    .replace(TRAILING_GROUP, ' ')
-    .replace(/[._]+/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
+  if (!s) return '';
+  let out = s;
+  for (const r of NOISE_RE_LIST) out = out.replace(r, ' ');
+  out = out.replace(/[-_.]+$/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  return out;
 }
 
-// Remove trailing ranges like "1-12", trailing single numbers, and words like "Complete"/"Full" when they appear
-function stripTrailingRangeAndComplete(s: string) {
-  let out = s.trim();
-  // remove common 'complete' suffixes
-  out = out.replace(/\b(?:complete(?: set| series)?|full|collection|complete-boxset)\b[.\s-]*$/i, '').trim();
-  // remove trailing season markers like 'Season 1' or 'Season 01'
-  out = out.replace(/\bseason\s*\d{1,2}\b$/i, '').trim();
-  // remove trailing numeric ranges (e.g. "1-12", "1 to 12") or single trailing number
-  out = out.replace(/(?:\b\d{1,3}\s*(?:-|–|—|to)\s*\d{1,3}\b|\b\d{1,3}(?:-\d{1,3})\b|\b\d{1,3}\b)\s*$/i, '').trim();
-  return out.replace(/\s{2,}/g, ' ').trim();
+function pickTitleCandidate(full: string, parent: string, grand: string) {
+  // Prefer the file name before the first episode marker as title, else parent, else grand
+  const cleaned = normalizeSeparators(stripNoise(full));
+  const markers = [SXXEXX, XXxYY, /\bEpisode\b/i, EP_RANGE, E_ONLY];
+  let idx = -1;
+  for (const m of markers) {
+    const r = cleaned.search(m);
+    if (r >= 0 && (idx < 0 || r < idx)) idx = r;
+  }
+  if (idx >= 0) {
+    const cand = cleaned.slice(0, idx).trim();
+    if (cand.length >= 2) return cand;
+  }
+  // fallback to cleaned filename without extension
+  if (cleaned.length >= 3) return cleaned;
+  // parent folder heuristics
+  const p = normalizeSeparators(stripNoise(parent));
+  if (p && p.length >= 3 && !/^season\b/i.test(p) && (p.match(/\d/g)||[]).length < 6) return p;
+  const g = normalizeSeparators(stripNoise(grand));
+  if (g && g.length >= 3) return g;
+  return '';
 }
 
 export type ParsedGuess = {
@@ -63,179 +66,167 @@ export type ParsedGuess = {
   year?: number;
   season?: number;
   episodes?: number[];
-  /** First (primary) episode number when a single episode is inferred */
   episode_number?: number;
-  /** Example parsed name using Jellyfin/Plex scheme for the primary episode */
   parsedName?: string;
-  /** Example Jellyfin-style path (without extension) for the primary episode */
   jellyfinExample?: string;
-  /** Episode title when it can be inferred from filename */
   episode_title?: string;
   special?: boolean;
   absolute?: number[];
-  confidence: number;
+  confidence: number; // 0..100
   extra?: any;
 };
 
+function scoreAndNormalize(result: ParsedGuess) {
+  // normalize confidence to 0..100
+  result.confidence = Math.max(0, Math.min(100, Math.round(result.confidence)));
+  return result;
+}
+
+function makeParsedName(baseSeries: string, s: number|undefined, e: number|undefined, epTitle?: string) {
+  const ss = String((s||1)).padStart(2,'0');
+  const ee = String((e||1)).padStart(2,'0');
+  if (epTitle) return `${baseSeries} - S${ss}E${ee} - ${epTitle}`;
+  return `${baseSeries} - S${ss}E${ee}`;
+}
+
 export function inferFromPath(fullPath: string): ParsedGuess {
-  const ext = path.extname(fullPath);
-  const base = path.basename(fullPath, ext);
-  const dir = path.dirname(fullPath);
-  const parent = path.basename(dir);
-  const grand = path.basename(path.dirname(dir));
+  const ext = path.extname(fullPath || '');
+  const base = path.basename(fullPath || '', ext || '');
+  const dir = path.dirname(fullPath || '');
+  const parent = path.basename(dir || '');
+  const grand = path.basename(path.dirname(dir || ''));
 
-  const baseClean = stripNoise(base);
-  const parentClean = stripNoise(parent);
-  const grandClean = stripNoise(grand);
+  const baseStripped = stripNoise(base);
+  const parentStripped = stripNoise(parent);
+  const grandStripped = stripNoise(grand);
 
-  // prefer the text before an episode marker in the filename as the title candidate
-  const preEpisodeMatch = baseClean.match(SXXEXX_SINGLE) || baseClean.match(XXxYY) || baseClean.match(SEASON_WORD);
-  const baseBeforeEpisode = (preEpisodeMatch && preEpisodeMatch.index != null)
-    ? baseClean.slice(0, preEpisodeMatch.index).trim()
-    : baseClean;
+  const titleCand = pickTitleCandidate(base, parent, grand);
 
-  let titleSource = baseBeforeEpisode && baseBeforeEpisode.length >= 1 ? baseBeforeEpisode : baseClean;
-  let confidence = 0;
+  // year detection (prefer parent folder year, then filename)
+  let year: number|undefined;
+  const yearFromParent = (parentStripped.match(YEAR_RE)||[])[0];
+  const yearFromBase = (baseStripped.match(YEAR_RE)||[])[0];
+  if (yearFromParent) year = Number(yearFromParent);
+  else if (yearFromBase) year = Number(yearFromBase);
 
-  const yearBase = baseClean.match(YEAR_PAREN)?.[1] || baseClean.match(YEAR_BARE)?.[1];
-  const yearParent = parentClean.match(YEAR_PAREN)?.[1] || parentClean.match(YEAR_BARE)?.[1];
-  const year = Number(yearParent || yearBase) || undefined;
-  if (year) confidence += 2;
-
-  // use parent folder as title only if it looks like a title and the filename did not already provide one
-  const parentLooksTitle = !/\b(S\d{1,2}|Season\b|\d{1,2}x\d{2}|S\d{1,2}E\d{2})/i.test(parentClean) &&
-                           parentClean.length >= 3 &&
-                           (parentClean.match(/\d/g)?.length || 0) <= 4 &&
-                           (!baseBeforeEpisode || baseBeforeEpisode.length < 3);
-  if (parentLooksTitle) { titleSource = parentClean; confidence += 2; }
-
-  const parentIsSeason = /\bSeason\b/i.test(parentClean) || /\bS\d{1,2}\b/i.test(parentClean);
-  if (parentIsSeason && grandClean && !/\bSeason\b/i.test(grandClean)) {
-    titleSource = grandClean;
-    confidence += 1;
-  }
-
-  // canonicalize title candidate by stripping trailing ranges/"Complete" annotations
-  const rawTitle = titleSource.replace(YEAR_PAREN, '').trim();
-  const canonical = stripTrailingRangeAndComplete(rawTitle);
-  const title = norm(canonical);
-
-  let season: number | undefined;
-  let episodes: number[] | undefined;
-  let absolute: number[] | undefined;
+  // episode detection
+  let season: number|undefined;
+  let episodes: number[]|undefined;
+  let absolute: number[]|undefined;
   let special = false;
 
-  const multi = baseClean.match(SXXEXX_MULTI);
-  // explicit episode ranges like E01-03
-  const epRange = baseClean.match(EP_RANGE);
-  if (epRange && epRange[1] && epRange[2]) {
-    const start = Number(epRange[1]);
-    const end = Number(epRange[2]);
-    if (!isNaN(start) && !isNaN(end) && end >= start) {
-      episodes = [];
-      for (let i = start; i <= end; i++) episodes.push(i);
-  // try to find season context
-  const sxx = baseClean.match(SXXEXX_SINGLE) || parentClean.match(SEASON_WORD) || baseClean.match(SEASON_WORD);
-  if (sxx && sxx[1]) season = Number(sxx[1]);
-      confidence += 3;
-    }
-  }
-  if (multi && multi[1]) {
-    season = Number(multi[1]);
-    const matches = [...baseClean.matchAll(/E(\d{2})/ig)].map(m => Number(m[1]));
-    if (matches.length) episodes = matches;
-    confidence += 3;
-  } else {
-    const sxxexx = baseClean.match(SXXEXX_SINGLE);
-    const xxyy = baseClean.match(XXxYY);
-    const seasonWord = parentClean.match(SEASON_WORD) || baseClean.match(SEASON_WORD);
-    const epWord = baseClean.match(EPISODE_WORD);
-    const eOnly = baseClean.match(E_ONLY);
-
-    if (sxxexx) {
-      season = Number(sxxexx[1]);
-      episodes = [Number(sxxexx[2])];
-      confidence += 3;
-    } else if (xxyy?.groups) {
-      season = Number(xxyy[1]);
-      episodes = [Number(xxyy[2])];
-      confidence += 3;
-    } else if (seasonWord?.groups && epWord?.groups) {
-      season = Number(seasonWord[1]);
-      episodes = [Number(epWord[1])];
-      confidence += 2;
-    } else if (seasonWord?.groups && eOnly?.groups) {
-      season = Number(seasonWord[1]);
-      episodes = [Number(eOnly[1])];
-      confidence += 2;
-    } else {
-      const range = baseClean.match(MULTI_RANGE);
-      const absNums = range
-        ? [Number(range[1]), Number(range[2])]
-        : (baseClean.match(/\b(\d{1,3})\b/g) || [])
-            .map(Number)
-            .filter(n => n <= 300);
-      const fansubCue = ABSOLUTE_HINT.test(baseClean) || FANSUB_BRACKETS.test(path.basename(fullPath));
-      if (fansubCue && absNums.length) {
-        absolute = range ? absNums : [absNums[absNums.length - 1]];
-        confidence += 2;
+  // SxxExx patterns (may be multiple episodes)
+  const sMatch = base.match(SXXEXX_ALL);
+  if (sMatch) {
+    // collect all SxxExx occurrences
+    const all = [...base.matchAll(SXXEXX_ALL)];
+    if (all.length) {
+      // prefer first for season
+      const first = all[0];
+      if (first[1]) season = Number(first[1]);
+      const eps:number[] = [];
+      for (const a of all) {
+        // capture E.. occurrences after the Sxx
+        const after = a[0];
+        const es = [...after.matchAll(/E(\d{2,3})/ig)].map(m=>Number(m[1]));
+        for (const e of es) if (!isNaN(e)) eps.push(e);
       }
+      if (eps.length) episodes = eps;
     }
   }
 
-  if (/\b(OVA|OAD|SP|Special|Season 00|S0E)\b/i.test(baseClean) || /\bSeason[\s._-]*0\b/i.test(parentClean)) {
+  // explicit E-range (E01-03)
+  const range = base.match(EP_RANGE);
+  if (range && range[1] && range[2]) {
+    const start = Number(range[1]);
+    const end = Number(range[2]);
+    if (!isNaN(start) && !isNaN(end) && end>=start) {
+      episodes = episodes || [];
+      for (let i=start;i<=end;i++) episodes.push(i);
+    }
+  }
+
+  // XxYy style
+  const xy = base.match(XXxYY);
+  if (xy && xy[1] && xy[2]) {
+    season = season || Number(xy[1]);
+    episodes = episodes || [Number(xy[2])];
+  }
+
+  // fallback single SxxEyy
+  const sxx = base.match(SXXEXX);
+  if (sxx && sxx[1] && sxx[2]) {
+    season = season || Number(sxx[1]);
+    episodes = episodes || [Number(sxx[2])];
+  }
+
+  // E-only
+  if (!episodes) {
+    const eonly = base.match(E_ONLY);
+    if (eonly && eonly[1]) episodes = [Number(eonly[1])];
+  }
+
+  // absolute/OVA hints
+  const absNums = (base.match(/\b(\d{1,3})\b/g)||[]).map(n=>Number(n)).filter(n=>!isNaN(n) && n>0 && n<1000);
+  if ((ABSOLUTE_HINT.test(base) || ABSOLUTE_HINT.test(parent) || absNums.length>0) && !episodes) {
+    // treat last detected number as absolute episode if plausible
+    if (absNums.length) absolute = [absNums[absNums.length-1]];
+  }
+
+  if (/(OVA|OAD|SP|Special)\b/i.test(base) || /Season[\s._-]*0\b/i.test(parent)) {
     special = true;
     season = 0;
-    confidence += 1;
   }
 
-  const hasEpisode = !!(episodes?.length || absolute?.length || special);
-  const kind: 'movie' | 'series' = hasEpisode || parentIsSeason ? 'series' : 'movie';
+  const hasEpisode = !!(episodes && episodes.length) || !!(absolute && absolute.length) || special;
+  const kind: 'movie'|'series' = hasEpisode || /^season\b/i.test(parentStripped) ? 'series' : 'movie';
 
-  const episode_number = (episodes && episodes.length ? episodes[0] : (absolute && absolute.length ? absolute[0] : undefined));
-  // If we didn't already populate parsedName/episode_title above (inside try),
-  // attempt a lightweight extraction here so callers (and the UI) can see an
-  // episode title when present in the filename.
-  let episode_title: string | undefined = undefined;
-  let parsedNameOut: string | undefined = undefined;
-  let jellyfinExampleOut: string | undefined = undefined;
-  try {
-    // look for patterns like " - Title" after the episode code
-    const sxx = baseClean.match(SXXEXX_SINGLE) || baseClean.match(XXxYY);
-    if (sxx && sxx.index != null) {
-      const after = baseClean.slice(sxx.index + (sxx[0] || '').length).replace(/^[-\s:\t]+/, '').trim();
+  // episode title extraction (text after episode code)
+  let episode_title: string|undefined;
+  if (hasEpisode) {
+    const markerPos = base.search(/S\d{1,2}E\d{2,3}|\bE\d{1,3}\b|\bEpisode\b/i);
+    if (markerPos>=0) {
+      const after = normalizeSeparators(stripNoise(base.slice(markerPos + (base.match(/S\d{1,2}E\d{2,3}|\bE\d{1,3}\b|\bEpisode\b/i)?.[0]||'').length)));
       if (after) {
-        const tit = stripTrailingRangeAndComplete(after);
-        if (tit) {
-          // remove trailing non-alphanumeric punctuation leftover (like trailing '-')
-          const cleanedTit = tit.replace(/[\-_.\s:;]+$/g, '').trim();
-          episode_title = norm(cleanedTit);
-          const s = season ?? 1;
-          const e = episode_number ?? (episodes && episodes[0]) ?? 1;
-          const paddedS = String(s).padStart(2, '0');
-          const paddedE = String(e).padStart(2, '0');
-          const baseSeries = title || parentClean || grandClean || '';
-          parsedNameOut = `${baseSeries} - S${paddedS}E${paddedE} - ${episode_title}`;
-          jellyfinExampleOut = `${baseSeries}/Season ${paddedS}/${baseSeries} - S${paddedS}E${paddedE} - ${episode_title}`;
-        }
+        const cleaned = after.replace(/^[\-:\s]+/, '').replace(/[\-_.\s:;]+$/g,'').trim();
+        if (cleaned) episode_title = cleaned;
       }
     }
-  } catch (e) {}
+  }
 
-  const result = {
+  // Compute confidence score using simple heuristics
+  let confidence = 10;
+  if (kind==='series') confidence += 30;
+  if (hasEpisode && episodes && episodes.length) confidence += 30;
+  if (season!==undefined) confidence += 10;
+  if (absolute && absolute.length) confidence += 8;
+  if (special) confidence += 5;
+  if (year) confidence += 5;
+  if (titleCand && titleCand.length>0) confidence += 8;
+  if (!titleCand || titleCand.length<2) confidence -= 5;
+
+  const baseSeries = (titleCand || parentStripped || grandStripped || '').trim();
+  const episode_number = episodes && episodes.length ? episodes[0] : (absolute && absolute.length ? absolute[0] : undefined);
+
+  const parsedName = hasEpisode ? makeParsedName(baseSeries, season, episode_number, episode_title) : undefined;
+  const jellyfinExample = hasEpisode && baseSeries ? `${baseSeries}/Season ${String((season||1)).padStart(2,'0')}/${parsedName}` : undefined;
+
+  const result: ParsedGuess = scoreAndNormalize({
     kind,
-    title: title || undefined,
-    year,
-    season,
-    episodes,
-    episode_number,
-    special,
-    absolute,
+    title: baseSeries || undefined,
+    year: year || undefined,
+    season: season===undefined?undefined:season,
+    episodes: episodes || undefined,
+    episode_number: episode_number===undefined?undefined:episode_number,
+    parsedName: parsedName || undefined,
+    jellyfinExample: jellyfinExample || undefined,
+    episode_title: episode_title || undefined,
+    special: special || undefined,
+    absolute: absolute || undefined,
     confidence,
-    episode_title: episode_title,
-    parsedName: parsedNameOut,
-    jellyfinExample: jellyfinExampleOut
-  };
+    extra: { rawBase: base, parent, grand }
+  });
+
   try { log('debug', `inferFromPath: ${fullPath} -> ${JSON.stringify(result)}`); } catch {}
   return result;
 }
