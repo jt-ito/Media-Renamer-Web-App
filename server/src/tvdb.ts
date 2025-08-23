@@ -122,8 +122,11 @@ export async function getSeries(seriesId: number) {
     // receive the same preferred/annotated shape as searchTVDB produces.
     if (d) {
       const picked = pickPreferredName(d);
-      (d as any).preferredName = picked;
-      // ensure _pickedNameSource is set by the helper already
+      // ensure callers that read `name` get the preferred (English/alias)
+      // display name rather than the raw localized `name` returned by TVDB.
+      try { (d as any).name = picked; } catch {}
+      try { (d as any).preferredName = picked; } catch {}
+      // `_pickedNameSource` is set by pickPreferredName already.
     }
   } catch (e) {}
   return d;
