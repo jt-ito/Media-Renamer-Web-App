@@ -144,6 +144,67 @@ export function episodeOutputPath(
   const rawDisplayName = chooseDisplayName(series);
   try { log('debug', `[episodeOutputPath] DIAG: rawDisplayName='${rawDisplayName}', series.extra=${JSON.stringify((series as any).extra||{})}`); } catch {}
   const seriesName = sanitize(rawDisplayName || series.name || '');
+  // Helper: regex-driven tag extractor. Scans the episode-title tail and pulls
+  // known release tokens (resolution, source, codec, audio, subs, language, group,
+  // release-type). It removes matched tokens from the textual title and returns
+  // a cleaned title plus a normalized list of tags.
+  function splitReleaseTags(input?: string) {
+    if (!input) return { title: '', tags: [] };
+    let tail = String(input);
+    const tags: string[] = [];
+
+    // Pre-normalize common multi-token patterns so splitting doesn't break them
+    const normMap: Array<[RegExp, string]> = [
+      [/\bh\.?264\b/ig, 'H264'],
+      [/\baac2(?:\.0)?\b/ig, 'AAC20'],
+      [/\baac\b/ig, 'AAC'],
+      [/\bweb[-_. ]?dl\b/ig, 'WEBDL'],
+      [/\bweb[-_. ]?rip\b/ig, 'WEBRIP'],
+      [/\bwebrip\b/ig, 'WEBRIP'],
+      [/\bbluray\b/ig, 'BLURAY'],
+      [/\bbdremux\b/ig, 'BDREMUX'],
+      [/\bbdrip\b/ig, 'BDRIP'],
+      [/\bx26?4\b/ig, 'x264'],
+      [/\b(hd)?tv\b/ig, 'HDTV'],
+      [/\b(dolbyvision|dolby)\b/ig, 'DOLBY'],
+      [/\b1080p60\b/ig, '1080p60'],
+    ];
+    for (const [r, rep] of normMap) tail = tail.replace(r, rep);
+
+    // Tokenize on separators
+    const tokens = tail.split(/[^A-Za-z0-9]+/).filter(Boolean);
+
+    // Known tokens mapping to canonical tags
+    const canonical: Record<string, string> = {
+      '2160p': '2160p', '4k': '2160p', '1080p': '1080p', '720p': '720p', '480p': '480p',
+      'webdl': 'WEB-DL', 'webrip': 'WEB-RIP', 'web': 'WEB', 'hdtv': 'HDTV', 'bdrip': 'BDRIP', 'bdremux': 'BDREMUX', 'bluray': 'BLURAY',
+      'x264': 'x264', 'x265': 'x265', 'h264': 'H264', 'hevc': 'HEVC', 'avc': 'AVC', 'av1': 'AV1', 'xvid': 'XVID',
+      'aac20': 'AAC2.0', 'aac2': 'AAC2.0', 'aac': 'AAC', 'flac': 'FLAC', 'ac3': 'AC3', 'ddp51': 'DDP5.1', 'dts': 'DTS', 'dtshd': 'DTS-HD',
+      'uncensored': 'uncensored', 'uncut': 'uncut', 'remux': 'remux', 'proper': 'proper', 'repack': 'repack', 'limited': 'limited', 'unrated': 'unrated',
+      'esub': 'ESub', 'hardsub': 'Hardsub', 'softsub': 'Softsub', 'sub': 'Sub', 'subs': 'Subs', 'ass': 'ASS', 'ssa': 'SSA', 'srt': 'SRT',
+      'jpn': 'JPN', 'jap': 'JPN', 'jp': 'JPN', 'eng': 'ENG', 'english': 'ENG', 'kor': 'KOR', 'zh': 'ZHO', 'chs': 'ZHCN', 'cht': 'ZHTW',
+      'hdr': 'HDR', 'hdr10': 'HDR10', 'dolbyvision': 'DOLBY', '10bit': '10bit', '8bit': '8bit',
+      '1080p60': '1080p60', '720p60': '720p60', '60fps': '60fps'
+    };
+
+    // scan tokens from the end, collecting known tokens into tags
+    let i = tokens.length - 1;
+    while (i >= 0) {
+      const t = tokens[i];
+      const lower = String(t).toLowerCase();
+      if (canonical[lower]) { tags.unshift(canonical[lower]); i--; continue; }
+      // group names: CamelCase or mixed-case token likely a group
+      if (i === tokens.length - 1 && /^[A-Za-z][A-Za-z0-9]{2,40}$/.test(t) && /[A-Z]/.test(t)) { tags.unshift(t); i--; continue; }
+      // language codes/short tokens
+      if (/^[A-Za-z]{2,4}$/.test(t) && canonical[lower]) { tags.unshift(canonical[lower]); i--; continue; }
+      // numeric tokens like '264' that are part of H264 were normalized earlier; avoid keeping small numeric tokens alone
+      if (/^\d{1,4}$/.test(t) && tags.length > 0) { tags.unshift(t); i--; continue; }
+      break;
+    }
+
+    const title = tokens.slice(0, i + 1).join(' ').replace(/\s+/g, ' ').trim();
+    return { title, tags };
+  }
   let year = series.year ? String(series.year) : '';
   let debugSource = 'series.year';
   log('debug', `[episodeOutputPath] INPUTS: series.name='${series.name}', series.year='${series.year}', lib.inputRoot='${lib.inputRoot}', lib.outputRoot='${lib.outputRoot}'`);
@@ -166,10 +227,13 @@ export function episodeOutputPath(
   }
   const seriesFolder = year ? `${seriesName} (${year})` : seriesName;
   const epCode = `S${pad2(season)}E${eps.map(pad2).join('E')}`;
-  const epTitle = episodeTitle ? sanitize(episodeTitle) : '';
+  // Extract release/group tags from the raw episode title and convert into bracketed suffixes
+  const { title: extractedTitle, tags: extractedTags } = splitReleaseTags(episodeTitle);
+  const epTitle = extractedTitle ? sanitize(extractedTitle) : (episodeTitle ? sanitize(episodeTitle) : '');
+  const tagSuffix = (extractedTags && extractedTags.length) ? ' ' + extractedTags.map(t => `[${t}]`).join('') : '';
   const outputRoot = lib.outputRoot ?? '';
   const folder = path.join(outputRoot, seriesFolder, `Season ${pad2(season)}`);
-  const file = `${seriesFolder} - ${epCode}${epTitle ? ` - ${epTitle}` : ''}${ext}`;
+  const file = `${seriesFolder} - ${epCode}${epTitle ? ` - ${epTitle}` : ''}${tagSuffix}${ext}`;
   const finalPath = path.join(folder, file);
   log('debug', `[episodeOutputPath] RESULT: year='${year}' (source=${debugSource}), finalPath='${finalPath}'`);
   return finalPath;
