@@ -78,27 +78,29 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
       const tr = d.translations;
       // Build a preference list starting with the user's preferred language
   const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
-      let preferred: string | undefined;
+  let preferred: string | undefined;
+  let pickedSource: string | undefined;
       if (tr) {
         if (Array.isArray(tr)) {
           for (const p of preferLangs) {
             const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
-            if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
+            if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; pickedSource = 'translation'; break; }
           }
           if (!preferred) {
             const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
-            if (en) preferred = en.name || en.title || en.translation;
+            if (en) { preferred = en.name || en.title || en.translation; pickedSource = 'translation'; }
           }
         } else if (typeof tr === 'object') {
           for (const p of preferLangs) {
             if (tr[p]) {
               preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation);
+              pickedSource = 'translation';
               break;
             }
           }
           if (!preferred) {
             const k = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
-            if (k) preferred = (typeof tr[k] === 'string') ? tr[k] : (tr[k].name || tr[k].title || tr[k].translation);
+            if (k) { preferred = (typeof tr[k] === 'string') ? tr[k] : (tr[k].name || tr[k].title || tr[k].translation); pickedSource = 'translation'; }
           }
         }
       }
@@ -114,18 +116,23 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
                 const found = (aliases as any[]).find((a: any) => (a.language && a.language.toString().toLowerCase().startsWith(p)) || (a.iso_639_3 && a.iso_639_3.toString().toLowerCase() === p));
                 if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
               }
+              if (preferred) pickedSource = 'alias';
             } else {
               // aliases are simple strings; prefer the first non-CJK alias
               const nonCjk = (aliases as string[]).find(s => !cjkRe.test((s||'').toString()));
-              if (nonCjk) preferred = nonCjk;
+              if (nonCjk) { preferred = nonCjk; pickedSource = 'alias'; }
             }
           }
         }
-      let name = d.name || d.title || preferred || d.slug || '';
-      if (cjkRe.test((name || '') + '') && preferred) name = preferred;
-      return (name || '').toString();
+        let name = d.name || d.title || preferred || d.slug || '';
+        if (cjkRe.test((name || '') + '') && preferred) {
+          name = preferred;
+        }
+        // annotate the source on the object so callers can inspect it
+        try { if (pickedSource) (d as any)._pickedNameSource = pickedSource; else (d as any)._pickedNameSource = 'name'; } catch {}
+        return (name || '').toString();
     }
-    const name = pickPreferredName(d);
+  const name = pickPreferredName(d);
 
     // Year extraction: prefer explicit `year` or try from known date fields
     let y: number | undefined;
@@ -135,7 +142,7 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
       const maybe = (dateStr || '').toString().slice(0,4);
       if (/^\d{4}$/.test(maybe)) y = Number(maybe);
     }
-    try { log('debug', `searchTVDB: candidate id=${d.tvdb_id||d.id} name=${d.name||d.title} year=${y}`); } catch {}
+  try { log('debug', `searchTVDB: candidate id=${d.tvdb_id||d.id} name=${name} year=${y}`); } catch {}
 
     // Infer the returned object type when available. TVDB may include a `type` or `objectType` field.
     let returnedType: MediaType = type; // default to requested type
@@ -148,7 +155,7 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
       name,
       year: y,
       type: returnedType,
-      extra: { imdb: d.imdb_id, tmdb: d.tmdb_id }
+      extra: { imdb: d.imdb_id, tmdb: d.tmdb_id, nameSource: (d._pickedNameSource || 'name') }
     } as MatchCandidate;
   });
 }
