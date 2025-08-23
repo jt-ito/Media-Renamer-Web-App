@@ -79,7 +79,13 @@ export function inferFromPath(fullPath: string): ParsedGuess {
   const parentClean = stripNoise(parent);
   const grandClean = stripNoise(grand);
 
-  let titleSource = baseClean;
+  // prefer the text before an episode marker in the filename as the title candidate
+  const preEpisodeMatch = baseClean.match(SXXEXX_SINGLE) || baseClean.match(XXxYY) || baseClean.match(SEASON_WORD);
+  const baseBeforeEpisode = (preEpisodeMatch && preEpisodeMatch.index != null)
+    ? baseClean.slice(0, preEpisodeMatch.index).trim()
+    : baseClean;
+
+  let titleSource = baseBeforeEpisode && baseBeforeEpisode.length >= 1 ? baseBeforeEpisode : baseClean;
   let confidence = 0;
 
   const yearBase = baseClean.match(YEAR_PAREN)?.[1] || baseClean.match(YEAR_BARE)?.[1];
@@ -87,9 +93,11 @@ export function inferFromPath(fullPath: string): ParsedGuess {
   const year = Number(yearParent || yearBase) || undefined;
   if (year) confidence += 2;
 
+  // use parent folder as title only if it looks like a title and the filename did not already provide one
   const parentLooksTitle = !/\b(S\d{1,2}|Season\b|\d{1,2}x\d{2}|S\d{1,2}E\d{2})/i.test(parentClean) &&
                            parentClean.length >= 3 &&
-                           (parentClean.match(/\d/g)?.length || 0) <= 4;
+                           (parentClean.match(/\d/g)?.length || 0) <= 4 &&
+                           (!baseBeforeEpisode || baseBeforeEpisode.length < 3);
   if (parentLooksTitle) { titleSource = parentClean; confidence += 2; }
 
   const parentIsSeason = /\bSeason\b/i.test(parentClean) || /\bS\d{1,2}\b/i.test(parentClean);
