@@ -87,10 +87,18 @@ export function inferFromPath(fullPath: string): ParsedGuess {
   const year = Number(yearParent || yearBase) || undefined;
   if (year) confidence += 2;
 
+  // Heuristic: only prefer the parent folder as the title when the filename
+  // itself doesn't contain any significant alphabetic text (e.g. the series
+  // name). This avoids cases where generic folders like "input" or
+  // "Delayed Input" incorrectly override a descriptive filename on Linux.
+  function hasSignificantText(s: string) {
+    // consider a word with 3+ letters as significant
+    return /\b[a-zA-Z]{3,}\b/.test(s);
+  }
   const parentLooksTitle = !/\b(S\d{1,2}|Season\b|\d{1,2}x\d{2}|S\d{1,2}E\d{2})/i.test(parentClean) &&
                            parentClean.length >= 3 &&
                            (parentClean.match(/\d/g)?.length || 0) <= 4;
-  if (parentLooksTitle) { titleSource = parentClean; confidence += 2; }
+  if (parentLooksTitle && !hasSignificantText(baseClean)) { titleSource = parentClean; confidence += 2; }
 
   const parentIsSeason = /\bSeason\b/i.test(parentClean) || /\bS\d{1,2}\b/i.test(parentClean);
   if (parentIsSeason && grandClean && !/\bSeason\b/i.test(grandClean)) {
