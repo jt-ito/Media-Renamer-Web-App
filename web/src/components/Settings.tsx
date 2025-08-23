@@ -17,7 +17,7 @@ const LS_KEY = 'app.settings';
 const DEFAULT_MOVIE_SCHEME =
   '{title}{year? " (" + year + ")" : ""}/{title}{year? " (" + year + ")" : ""}{ext}';
 const DEFAULT_SERIES_SCHEME =
-  '{series}/Season {season:02}/{series} - S{season:02}{episode? "E" + episode: ""}{title? " - " + title : ""}{ext}';
+  '{series}/Season {season:02}/{series} - S{season:02}E{episode:02}{title? " - " + title : ""}{ext}';
 
 function loadLocal(): SettingsData | null {
   try {
