@@ -150,12 +150,17 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
     if (t.includes('movie')) returnedType = 'movie';
     else if (t.includes('series') || t.includes('show') || t.includes('tv')) returnedType = 'series';
 
+    const audit: any = {
+      pickedNameSource: (d._pickedNameSource || 'name'),
+      translations: Array.isArray(d.translations) ? d.translations.map((t:any)=> ({ language: t.language, name: t.name || t.title || t.translation })) : undefined,
+      aliases: d.aliases,
+    };
     return {
       id,
       name,
       year: y,
       type: returnedType,
-      extra: { imdb: d.imdb_id, tmdb: d.tmdb_id, nameSource: (d._pickedNameSource || 'name') }
+      extra: { imdb: d.imdb_id, tmdb: d.tmdb_id, nameSource: (d._pickedNameSource || 'name'), audit }
     } as MatchCandidate;
   });
 }
