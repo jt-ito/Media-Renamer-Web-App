@@ -68,9 +68,11 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
     // translation exists, prefer the English/romaji one.
     const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
     function pickPreferredName(d: any) {
+      const settingsLang = (loadSettings().tvdbLanguage || 'en').toString().toLowerCase();
       // try translations in several shapes
       const tr = d.translations;
-      const preferLangs = ['en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn'];
+      // Build a preference list starting with the user's preferred language
+  const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
       let preferred: string | undefined;
       if (tr) {
         if (Array.isArray(tr)) {

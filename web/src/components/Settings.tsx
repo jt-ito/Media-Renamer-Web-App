@@ -8,6 +8,7 @@ type SettingsData = {
     series: string;
   };
   tvdbKey?: string;
+  tvdbLanguage?: string;
   port?: number;
 };
 
@@ -41,6 +42,7 @@ export function Settings() {
   const [movieScheme, setMovieScheme] = useState(DEFAULT_MOVIE_SCHEME);
   const [seriesScheme, setSeriesScheme] = useState(DEFAULT_SERIES_SCHEME);
   const [tvdbKey, setTvdbKey] = useState('');
+  const [tvdbLanguage, setTvdbLanguage] = useState('en');
   const [showTvdbKey, setShowTvdbKey] = useState(false);
   const [port, setPort] = useState<number | undefined>(undefined);
 
@@ -78,14 +80,18 @@ export function Settings() {
         const res = await fetch('/api/settings');
         if (res.ok) {
           const data = (await res.json()) as Partial<SettingsData>;
-      const merged: SettingsData = {
+  const merged: SettingsData = {
             libraryPath: data.libraryPath ?? '',
             outputPath: data.outputPath ?? '',
             naming: {
               movie: data.naming?.movie ?? DEFAULT_MOVIE_SCHEME,
               series: data.naming?.series ?? DEFAULT_SERIES_SCHEME,
             },
-            tvdbKey: data.tvdbKey ?? '',
+    tvdbKey: data.tvdbKey ?? '',
+    // server may store preferred language under tvdbLanguage
+    // we'll surface it in the UI as 'tvdbLanguage'
+    // default to 'en' when not provided
+    tvdbLanguage: (data as any).tvdbLanguage ?? 'en',
             port: data.port
           };
           if (!abort) {
@@ -94,8 +100,9 @@ export function Settings() {
             setOutputPath(merged.outputPath);
             setMovieScheme(merged.naming.movie);
             setSeriesScheme(merged.naming.series);
-                setTvdbKey(merged.tvdbKey ?? '');
-                setPort(merged.port as number | undefined);
+          setTvdbKey(merged.tvdbKey ?? '');
+            setTvdbLanguage((merged as any).tvdbLanguage ?? 'en');
+            setPort(merged.port as number | undefined);
               }
           saveLocal(merged);
         } else {
@@ -109,6 +116,7 @@ export function Settings() {
             setMovieScheme(merged.naming.movie);
             setSeriesScheme(merged.naming.series);
             setTvdbKey(merged.tvdbKey ?? '');
+            setTvdbLanguage((merged as any).tvdbLanguage ?? 'en');
             setPort(merged.port as number | undefined);
           }
         }
@@ -141,9 +149,11 @@ export function Settings() {
       outputPath,
   naming: { movie: movieScheme, series: seriesScheme },
   tvdbKey: tvdbKey,
+  // include tvdbLanguage in the payload
+  tvdbLanguage: tvdbLanguage,
   port: port,
     }),
-  [libraryPath, outputPath, movieScheme, seriesScheme, tvdbKey, port]
+  [libraryPath, outputPath, movieScheme, seriesScheme, tvdbKey, tvdbLanguage, port]
   );
   
 
@@ -865,6 +875,16 @@ export function Settings() {
               </div>
               <p className="text-xs text-muted mt-1">Enter your TVDB API key to enable faster TV metadata lookups. Kept in server settings when you save.</p>
                 <div className="text-xs text-muted-foreground mt-1">To replace an existing key: first clear the field and click Save (this disables TVDB), then enter the new key and click Save again to activate it.</div>
+            </div>
+            <div className="mt-2">
+              <label htmlFor="tvdbLanguage" className="block text-sm font-medium mb-1">Preferred TVDB language</label>
+              <select id="tvdbLanguage" className="input" value={tvdbLanguage} onChange={(e) => setTvdbLanguage(e.target.value)}>
+                <option value="en">English</option>
+                <option value="romaji">Romaji</option>
+                <option value="ja">Japanese</option>
+                <option value="zh">Chinese</option>
+              </select>
+              <p className="text-xs text-muted mt-1">Preferred language to use when choosing TVDB series titles. Default: English.</p>
             </div>
             {/* Preview area */}
             <div className="rounded-md border p-3 bg-muted/20">
