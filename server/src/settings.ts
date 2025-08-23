@@ -10,6 +10,8 @@ const SETTINGS_PATH = process.env.SETTINGS_PATH || '/app/config/settings.json';
 
 export type Settings = {
   tvdbKey?: string;
+  /** Preferred TVDB language code (e.g. 'en', 'ja', 'romaji') */
+  tvdbLanguage?: string;
   movieScheme?: string;  // relative path template without extension on final segment
   seriesScheme?: string; // relative path template without extension on final segment
   port?: number;

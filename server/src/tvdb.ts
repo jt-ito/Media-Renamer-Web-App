@@ -63,76 +63,9 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
   return (js.data || []).map((d: any) => {
     // Determine the TVDB id and a readable name
     const id = Number(d.tvdb_id ?? d.id ?? d.seriesId ?? d.movieId ?? 0) || 0;
-    // Prefer English / romaji translations when available. TVDB can return localized
-    // names (including Japanese). If the returned `name` is CJK, but an English
-    // translation exists, prefer the English/romaji one.
-    const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
-    function pickPreferredName(d: any) {
-  // Avoid depending on the exact shape of the exported `Settings` type from
-  // `settings.ts` (some branches or CI snapshots may not include
-  // `tvdbLanguage`). Cast to a local, explicit shape that makes the
-  // optionality clear while keeping strict typing for the rest of this file.
-  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
-  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
-      // try translations in several shapes
-      const tr = d.translations;
-      // Build a preference list starting with the user's preferred language
-  const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
-  let preferred: string | undefined;
-  let pickedSource: string | undefined;
-      if (tr) {
-        if (Array.isArray(tr)) {
-          for (const p of preferLangs) {
-            const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
-            if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; pickedSource = 'translation'; break; }
-          }
-          if (!preferred) {
-            const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
-            if (en) { preferred = en.name || en.title || en.translation; pickedSource = 'translation'; }
-          }
-        } else if (typeof tr === 'object') {
-          for (const p of preferLangs) {
-            if (tr[p]) {
-              preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation);
-              pickedSource = 'translation';
-              break;
-            }
-          }
-          if (!preferred) {
-            const k = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
-            if (k) { preferred = (typeof tr[k] === 'string') ? tr[k] : (tr[k].name || tr[k].title || tr[k].translation); pickedSource = 'translation'; }
-          }
-        }
-      }
-        // If translations didn't yield a preferred name, TVDB sometimes provides
-        // aliases (either as strings or objects with language tags). Use those
-        // as a fallback: prefer aliased English / romaji names when available.
-        if (!preferred && d.aliases) {
-          const aliases = d.aliases;
-          if (Array.isArray(aliases) && aliases.length) {
-            // alias entries can be objects like { language: 'eng', name: '...' }
-            if (typeof aliases[0] === 'object') {
-              for (const p of preferLangs) {
-                const found = (aliases as any[]).find((a: any) => (a.language && a.language.toString().toLowerCase().startsWith(p)) || (a.iso_639_3 && a.iso_639_3.toString().toLowerCase() === p));
-                if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
-              }
-              if (preferred) pickedSource = 'alias';
-            } else {
-              // aliases are simple strings; prefer the first non-CJK alias
-              const nonCjk = (aliases as string[]).find(s => !cjkRe.test((s||'').toString()));
-              if (nonCjk) { preferred = nonCjk; pickedSource = 'alias'; }
-            }
-          }
-        }
-        let name = d.name || d.title || preferred || d.slug || '';
-        if (cjkRe.test((name || '') + '') && preferred) {
-          name = preferred;
-        }
-        // annotate the source on the object so callers can inspect it
-        try { if (pickedSource) (d as any)._pickedNameSource = pickedSource; else (d as any)._pickedNameSource = 'name'; } catch {}
-        return (name || '').toString();
-    }
-  const name = pickPreferredName(d);
+    // Prefer English / romaji translations when available. Use the top-level
+    // helper `pickPreferredName` to pick and annotate the object.
+    const name = pickPreferredName(d);
 
     // Year extraction: prefer explicit `year` or try from known date fields
     let y: number | undefined;
@@ -151,7 +84,7 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
     else if (t.includes('series') || t.includes('show') || t.includes('tv')) returnedType = 'series';
 
     const audit: any = {
-      pickedNameSource: (d._pickedNameSource || 'name'),
+  pickedNameSource: (d._pickedNameSource || 'name'),
       translations: Array.isArray(d.translations) ? d.translations.map((t:any)=> ({ language: t.language, name: t.name || t.title || t.translation })) : undefined,
       aliases: d.aliases,
     };
@@ -183,5 +116,75 @@ export async function mapAbsoluteToAired(seriesId: number, abs: number[]) {
 export async function getSeries(seriesId: number) {
   const js: any = await tvdb(`/series/${seriesId}`);
   try { log('debug', `getSeries: seriesId=${seriesId} keys=${Object.keys(js || {}).join(',')}`); } catch {}
-  return js.data || js;
+  const d = js.data || js;
+  try {
+    // If we got a raw TVDB object, pick a preferred name and annotate so callers
+    // receive the same preferred/annotated shape as searchTVDB produces.
+    if (d) {
+      const picked = pickPreferredName(d);
+      (d as any).preferredName = picked;
+      // ensure _pickedNameSource is set by the helper already
+    }
+  } catch (e) {}
+  return d;
+}
+
+// Helper: pick a preferred human-friendly name from raw TVDB series/movie object
+function pickPreferredName(d: any) {
+  const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
+  // Avoid depending on the exact shape of the exported `Settings` type from
+  // `settings.ts` (some branches or CI snapshots may not include
+  // `tvdbLanguage`). Cast to a local, explicit shape that makes the
+  // optionality clear while keeping strict typing for the rest of this file.
+  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
+  const tr = d.translations;
+  const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
+  let preferred: string | undefined;
+  let pickedSource: string | undefined;
+  if (tr) {
+    if (Array.isArray(tr)) {
+      for (const p of preferLangs) {
+        const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
+        if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; pickedSource = 'translation'; break; }
+      }
+      if (!preferred) {
+        const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
+        if (en) { preferred = en.name || en.title || en.translation; pickedSource = 'translation'; }
+      }
+    } else if (typeof tr === 'object') {
+      for (const p of preferLangs) {
+        if (tr[p]) {
+          preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation);
+          pickedSource = 'translation';
+          break;
+        }
+      }
+      if (!preferred) {
+        const k = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
+        if (k) { preferred = (typeof tr[k] === 'string') ? tr[k] : (tr[k].name || tr[k].title || tr[k].translation); pickedSource = 'translation'; }
+      }
+    }
+  }
+  if (!preferred && d.aliases) {
+    const aliases = d.aliases;
+    if (Array.isArray(aliases) && aliases.length) {
+      if (typeof aliases[0] === 'object') {
+        for (const p of preferLangs) {
+          const found = (aliases as any[]).find((a: any) => (a.language && a.language.toString().toLowerCase().startsWith(p)) || (a.iso_639_3 && a.iso_639_3.toString().toLowerCase() === p));
+          if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
+        }
+        if (preferred) pickedSource = 'alias';
+      } else {
+        const nonCjk = (aliases as string[]).find(s => !cjkRe.test((s||'').toString()));
+        if (nonCjk) { preferred = nonCjk; pickedSource = 'alias'; }
+      }
+    }
+  }
+  let name = d.name || d.title || preferred || d.slug || '';
+  if (cjkRe.test((name || '') + '') && preferred) {
+    name = preferred;
+  }
+  try { if (pickedSource) (d as any)._pickedNameSource = pickedSource; else (d as any)._pickedNameSource = 'name'; } catch {}
+  return (name || '').toString();
 }
