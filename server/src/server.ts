@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url';
 import { loadLibraries, saveLibraries } from './config.js';
 import { getLogs, log } from './logging.js';
 import { inferFromPath } from './parse.js';
-import { searchTVDB, getEpisodeByAiredOrder, mapAbsoluteToAired, invalidateTVDBToken, getSeries } from './tvdb.js';
+import { searchTVDB, getEpisodeByAiredOrder, mapAbsoluteToAired, invalidateTVDBToken, getSeries, getEpisodePreferredTitle } from './tvdb.js';
 import { Library, MediaType, RenamePlan, ScanItem } from './types.js';
 import { planEpisode, planMovie, applyPlans } from './renamer.js';
 import { initApproved, isApproved, markApproved, approvedList, unapproveLast } from './approved.js';
@@ -526,8 +526,13 @@ async function bootstrap() {
     const sId = Number(q.seriesId);
     const season = Number(q.season);
     const ep = Number(q.episode);
-    const data = await getEpisodeByAiredOrder(sId, season, ep);
-    return { title: (data as any)?.name || (data as any)?.episodeName || null };
+    try {
+      const title = await getEpisodePreferredTitle(sId, season, ep);
+      return { title: title || null };
+    } catch (e) {
+      const data = await getEpisodeByAiredOrder(sId, season, ep);
+      return { title: (data as any)?.name || (data as any)?.episodeName || null };
+    }
   });
 
   app.get('/api/map-absolute', async (req) => {

@@ -104,6 +104,46 @@ export async function getEpisodeByAiredOrder(seriesId: number, season: number, e
   return match;
 }
 
+// Pick a preferred episode title (translations -> fallback to name/episodeName)
+function pickPreferredEpisodeName(e: any) {
+  if (!e) return undefined;
+  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
+  const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
+  const tr = e.translations || e.translatedNames || e.translationsMap;
+  let preferred: string | undefined;
+  if (tr) {
+    if (Array.isArray(tr)) {
+      for (const p of preferLangs) {
+        const found = tr.find((t: any) => (t.language && t.language.toString().toLowerCase().startsWith(p)) || (t.iso_639_3 && t.iso_639_3.toString().toLowerCase() === p));
+        if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
+      }
+      if (!preferred) {
+        const en = tr.find((t: any) => t.language && t.language.toString().toLowerCase().startsWith('en'));
+        if (en) preferred = en.name || en.title || en.translation;
+      }
+    } else if (typeof tr === 'object') {
+      for (const p of preferLangs) {
+        if (tr[p]) { preferred = (typeof tr[p] === 'string') ? tr[p] : (tr[p].name || tr[p].title || tr[p].translation); break; }
+      }
+      if (!preferred) {
+        const k = Object.keys(tr || {}).find(k => k.toLowerCase().startsWith('en'));
+        if (k) preferred = (typeof tr[k] === 'string') ? tr[k] : (tr[k].name || tr[k].title || tr[k].translation);
+      }
+    }
+  }
+  // fallback to name/episodeName
+  if (!preferred) preferred = e.name || e.episodeName || e.title || undefined;
+  return preferred;
+}
+
+export async function getEpisodePreferredTitle(seriesId: number, season: number, episode: number) {
+  const m = await getEpisodeByAiredOrder(seriesId, season, episode);
+  if (!m) return null;
+  const picked = pickPreferredEpisodeName(m);
+  return picked || (m.name || m.episodeName || null);
+}
+
 export async function mapAbsoluteToAired(seriesId: number, abs: number[]) {
   const js: any = await tvdb(`/series/${seriesId}/episodes/default?page=0`);
   const eps = js.data?.episodes || [];

@@ -40,6 +40,45 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [approved, setApproved] = useState<Record<string, any>>({});
   const [searchQuery, setSearchQuery] = useState('');
 
+  // refs map for observed items (used by IntersectionObserver below)
+  const itemRefs = useMemo(() => new Map<string, HTMLDivElement | null>(), []);
+
+  // Auto-fetch episode titles for items as they become visible
+  useEffect(() => {
+    if (typeof window === 'undefined' || !(window as any).IntersectionObserver) return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        try {
+          if (e.isIntersecting) {
+            const id = (e.target as HTMLElement).getAttribute('data-item-id');
+            if (id) {
+              for (const libId of Object.keys(scanItems || {})) {
+                const found = (scanItems[libId] || []).find((it: any) => it.id === id);
+                if (found) {
+                  fetchEpisodeTitleIfNeeded({ id: libId, name: '' } as any, found).catch(() => {});
+                  autoPreview({ id: libId, name: '' } as any, found).catch(() => {});
+                  break;
+                }
+              }
+            }
+          }
+        } catch (err) { /* ignore */ }
+      }
+    }, { root: null, rootMargin: '200px', threshold: 0.01 });
+
+    try {
+      const els = document.querySelectorAll('[data-item-id]');
+      els.forEach(el => observer.observe(el));
+    } catch (e) {}
+
+    const mo = new MutationObserver(() => {
+      try { const els = document.querySelectorAll('[data-item-id]'); els.forEach(el => observer.observe(el)); } catch {};
+    });
+    try { mo.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
+
+    return () => { try { observer.disconnect(); } catch {} try { mo.disconnect(); } catch {} };
+  }, [scanItems]);
+
   useEffect(() => {
     const load = async () => {
       setLoading(true);
@@ -243,6 +282,10 @@ export default function Dashboard({ buttons }: DashboardProps) {
       const data = await res.json();
       const items = data.items || [];
       setScanItems(s => ({ ...s, [lib.id]: items }));
+      // persist updated scan to server cache immediately
+      try {
+        await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...(scanItems || {}), [lib.id]: items }) });
+      } catch (e) { /* ignore persistence failures */ }
       // If the library is large, skip eager auto-preview to avoid hammering the client/network.
       const AUTO_PREVIEW_LIMIT = 30;
       try {
@@ -721,7 +764,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
             itemsToShow.map(item => (
-            <div key={item.id} style={{ position: 'relative' }}>
+            <div key={item.id} data-item-id={item.id} style={{ position: 'relative' }}>
               {/* checkbox positioned per-item so it aligns with this specific row */}
               {selectMode && (
                 <div style={{ position: 'absolute', left: -56, top: '50%', transform: 'translateY(-50%)', width: 56, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
