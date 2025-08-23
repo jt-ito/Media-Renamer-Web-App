@@ -3,14 +3,14 @@ import { log } from './logging.js';
 
 const YEAR_PAREN = /\((19\d{2}|20\d{2}|21\d{2})\)/;
 const YEAR_BARE = /\b(19\d{2}|20\d{2}|21\d{2})\b/;
-const SXXEXX_MULTI = /\bS(?<s>\d{1,2})E(?<e1>\d{2})(?:E(?<e2>\d{2}))*\b/i;
-const SXXEXX_SINGLE = /\bS(?<s>\d{1,2})E(?<e>\d{2})\b/i;
-const XXxYY = /\b(?<s>\d{1,2})x(?<e>\d{2})\b/i;
-const E_ONLY = /\bE(?<e>\d{2})\b/i;
-const EP_RANGE = /E(?<e1>\d{1,3})-(?<e2>\d{1,3})/i;
-const SEASON_WORD = /\bSeason[\s._-]*(?<s>\d{1,2})\b/i;
-const EPISODE_WORD = /\bEpisode[\s._-]*(?<e>\d{1,3})\b/i;
-const MULTI_RANGE = /\b(?<e1>\d{1,3})-(?<e2>\d{1,3})\b/;
+const SXXEXX_MULTI = /\bS(\d{1,2})E(\d{2})(?:E(\d{2}))*\b/i;
+const SXXEXX_SINGLE = /\bS(\d{1,2})E(\d{2})\b/i;
+const XXxYY = /\b(\d{1,2})x(\d{2})\b/i;
+const E_ONLY = /\bE(\d{2})\b/i;
+const EP_RANGE = /E(\d{1,3})-(\d{1,3})/i;
+const SEASON_WORD = /\bSeason[\s._-]*(\d{1,2})\b/i;
+const EPISODE_WORD = /\bEpisode[\s._-]*(\d{1,3})\b/i;
+const MULTI_RANGE = /\b(\d{1,3})-(\d{1,3})\b/;
 const ABSOLUTE_HINT = /\b(OVA|OAD|NCOP|NCED|SP|Special)\b/i;
 const FANSUB_BRACKETS = /\[[^\]]+\]/g;
 const CURLY = /\{[^}]+\}/g;
@@ -87,18 +87,10 @@ export function inferFromPath(fullPath: string): ParsedGuess {
   const year = Number(yearParent || yearBase) || undefined;
   if (year) confidence += 2;
 
-  // Heuristic: only prefer the parent folder as the title when the filename
-  // itself doesn't contain any significant alphabetic text (e.g. the series
-  // name). This avoids cases where generic folders like "input" or
-  // "Delayed Input" incorrectly override a descriptive filename on Linux.
-  function hasSignificantText(s: string) {
-    // consider a word with 3+ letters as significant
-    return /\b[a-zA-Z]{3,}\b/.test(s);
-  }
   const parentLooksTitle = !/\b(S\d{1,2}|Season\b|\d{1,2}x\d{2}|S\d{1,2}E\d{2})/i.test(parentClean) &&
                            parentClean.length >= 3 &&
                            (parentClean.match(/\d/g)?.length || 0) <= 4;
-  if (parentLooksTitle && !hasSignificantText(baseClean)) { titleSource = parentClean; confidence += 2; }
+  if (parentLooksTitle) { titleSource = parentClean; confidence += 2; }
 
   const parentIsSeason = /\bSeason\b/i.test(parentClean) || /\bS\d{1,2}\b/i.test(parentClean);
   if (parentIsSeason && grandClean && !/\bSeason\b/i.test(grandClean)) {
@@ -119,20 +111,20 @@ export function inferFromPath(fullPath: string): ParsedGuess {
   const multi = baseClean.match(SXXEXX_MULTI);
   // explicit episode ranges like E01-03
   const epRange = baseClean.match(EP_RANGE);
-  if (epRange?.groups && epRange.groups.e1 && epRange.groups.e2) {
-    const start = Number(epRange.groups.e1);
-    const end = Number(epRange.groups.e2);
+  if (epRange && epRange[1] && epRange[2]) {
+    const start = Number(epRange[1]);
+    const end = Number(epRange[2]);
     if (!isNaN(start) && !isNaN(end) && end >= start) {
       episodes = [];
       for (let i = start; i <= end; i++) episodes.push(i);
-      // try to find season context
-      const sxx = baseClean.match(SXXEXX_SINGLE) || parentClean.match(SEASON_WORD) || baseClean.match(SEASON_WORD);
-      if (sxx?.groups && sxx.groups.s) season = Number(sxx.groups.s);
+  // try to find season context
+  const sxx = baseClean.match(SXXEXX_SINGLE) || parentClean.match(SEASON_WORD) || baseClean.match(SEASON_WORD);
+  if (sxx && sxx[1]) season = Number(sxx[1]);
       confidence += 3;
     }
   }
-  if (multi?.groups?.s) {
-    season = Number(multi.groups.s);
+  if (multi && multi[1]) {
+    season = Number(multi[1]);
     const matches = [...baseClean.matchAll(/E(\d{2})/ig)].map(m => Number(m[1]));
     if (matches.length) episodes = matches;
     confidence += 3;
@@ -143,26 +135,26 @@ export function inferFromPath(fullPath: string): ParsedGuess {
     const epWord = baseClean.match(EPISODE_WORD);
     const eOnly = baseClean.match(E_ONLY);
 
-    if (sxxexx?.groups) {
-      season = Number(sxxexx.groups.s);
-      episodes = [Number(sxxexx.groups.e)];
+    if (sxxexx) {
+      season = Number(sxxexx[1]);
+      episodes = [Number(sxxexx[2])];
       confidence += 3;
     } else if (xxyy?.groups) {
-      season = Number(xxyy.groups.s);
-      episodes = [Number(xxyy.groups.e)];
+      season = Number(xxyy[1]);
+      episodes = [Number(xxyy[2])];
       confidence += 3;
     } else if (seasonWord?.groups && epWord?.groups) {
-      season = Number(seasonWord.groups.s);
-      episodes = [Number(epWord.groups.e)];
+      season = Number(seasonWord[1]);
+      episodes = [Number(epWord[1])];
       confidence += 2;
     } else if (seasonWord?.groups && eOnly?.groups) {
-      season = Number(seasonWord.groups.s);
-      episodes = [Number(eOnly.groups.e)];
+      season = Number(seasonWord[1]);
+      episodes = [Number(eOnly[1])];
       confidence += 2;
     } else {
       const range = baseClean.match(MULTI_RANGE);
       const absNums = range
-        ? [Number(range.groups!.e1), Number(range.groups!.e2)]
+        ? [Number(range[1]), Number(range[2])]
         : (baseClean.match(/\b(\d{1,3})\b/g) || [])
             .map(Number)
             .filter(n => n <= 300);
