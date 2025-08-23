@@ -105,10 +105,10 @@ export async function getEpisodeByAiredOrder(seriesId: number, season: number, e
 }
 
 // Pick a preferred episode title (translations -> fallback to name/episodeName)
-function pickPreferredEpisodeName(e: any) {
+function pickPreferredEpisodeName(e: any, langOverride?: string) {
   if (!e) return undefined;
   const settingsLocal = loadSettings() as { tvdbLanguage?: string };
-  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
+  const settingsLang = (langOverride || settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
   const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
   const tr = e.translations || e.translatedNames || e.translationsMap;
   let preferred: string | undefined;
@@ -137,10 +137,10 @@ function pickPreferredEpisodeName(e: any) {
   return preferred;
 }
 
-export async function getEpisodePreferredTitle(seriesId: number, season: number, episode: number) {
+export async function getEpisodePreferredTitle(seriesId: number, season: number, episode: number, lang?: string) {
   const m = await getEpisodeByAiredOrder(seriesId, season, episode);
   if (!m) return null;
-  const picked = pickPreferredEpisodeName(m);
+  const picked = pickPreferredEpisodeName(m, lang);
   // determine source for diagnostics
   let source = 'name';
   try {

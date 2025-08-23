@@ -526,8 +526,9 @@ async function bootstrap() {
     const sId = Number(q.seriesId);
     const season = Number(q.season);
     const ep = Number(q.episode);
+    const lang = (q.lang || q.language || q.tvdbLanguage) ? String(q.lang || q.language || q.tvdbLanguage) : undefined;
     try {
-      const res = await getEpisodePreferredTitle(sId, season, ep);
+      const res = await getEpisodePreferredTitle(sId, season, ep, lang);
       if (res && typeof res === 'object') return { title: res.title || null, source: res.source || 'name' };
       return { title: res || null, source: 'name' };
     } catch (e) {
