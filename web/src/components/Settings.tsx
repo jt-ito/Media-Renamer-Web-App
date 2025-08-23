@@ -241,6 +241,9 @@ export function Settings() {
     setMovieScheme(DEFAULT_MOVIE_SCHEME);
     setSeriesScheme(DEFAULT_SERIES_SCHEME);
   setTvdbKey('');
+  // Clear configured paths when resetting defaults
+  setLibraryPath('');
+  setOutputPath('');
   };
 
 

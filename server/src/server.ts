@@ -104,6 +104,36 @@ async function bootstrap() {
     // best-effort, do not fail startup
   }
 
+  // Post-startup housekeeping: remove accidental library named 'Tor' if present
+  try {
+    try {
+      const libs = loadLibraries();
+      const filtered = (Array.isArray(libs) ? libs.filter(l => String(l.name || '').trim() !== 'Tor') : libs) || [];
+      if (Array.isArray(libs) && filtered.length !== libs.length) {
+        saveLibraries(filtered as any);
+        log('info', 'Removed accidental library named Tor on startup');
+      }
+    } catch (e) { /* ignore */ }
+  } catch (e) {}
+
+  // Attempt to create symlinks from any configured libraries on startup so the
+  // container-host visible mount points are present before the UI/scan runs.
+  try {
+    try {
+      const libs = loadLibraries();
+      if (Array.isArray(libs) && libs.length) {
+        const inputRoots = Array.from(new Set(libs.map(b => String((b as any).inputRoot || '').trim()).filter(Boolean)));
+        const outputRoots = Array.from(new Set(libs.map(b => String((b as any).outputRoot || '').trim()).filter(Boolean)));
+        const res = createSymlinksFromLibs(inputRoots, outputRoots);
+        if ((res.input && !res.input.ok) || (res.output && !res.output.ok)) {
+          log('error', `Startup symlink creation had failures: ${JSON.stringify(res)}`);
+        } else {
+          log('info', `Startup symlink creation succeeded: ${JSON.stringify(res)}`);
+        }
+      }
+    } catch (e) { log('warn', `Startup symlink creation failed: ${String(e)}`); }
+  } catch (e) {}
+
   // guessit support removed; rely on builtin parsing
 
   const idFromPath = (p: string) => crypto.createHash('sha1').update(p).digest('hex');
