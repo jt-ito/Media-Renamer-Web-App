@@ -121,16 +121,9 @@ async function bootstrap() {
   try {
     try {
       const libs = loadLibraries();
-      if (Array.isArray(libs) && libs.length) {
-        const inputRoots = Array.from(new Set(libs.map(b => String((b as any).inputRoot || '').trim()).filter(Boolean)));
-        const outputRoots = Array.from(new Set(libs.map(b => String((b as any).outputRoot || '').trim()).filter(Boolean)));
-        const res = createSymlinksFromLibs(inputRoots, outputRoots);
-        if ((res.input && !res.input.ok) || (res.output && !res.output.ok)) {
-          log('error', `Startup symlink creation had failures: ${JSON.stringify(res)}`);
-        } else {
-          log('info', `Startup symlink creation succeeded: ${JSON.stringify(res)}`);
+        if (Array.isArray(libs) && libs.length) {
+          // symlink creation intentionally removed per user request
         }
-      }
     } catch (e) { log('warn', `Startup symlink creation failed: ${String(e)}`); }
   } catch (e) {}
 
@@ -176,102 +169,7 @@ async function bootstrap() {
     }
   }
 
-  /**
-   * Create symlinks at <baseDir>/input and <baseDir>/output pointing to the
-   * first inputRoots[0] and outputRoots[0] respectively. The baseDir is chosen
-   * from (in order): MR_BASE_DIR env var, MR_BUILD_PATH env var, settings.composeEnvFile's directory.
-   * If none are set, fall back to '/home/jt/containers/media-renamer' as a reasonable default
-   * for typical host setups (this fallback can be overridden by setting MR_BASE_DIR).
-   */
-  function createSymlinksFromLibs(inputRoots: string[], outputRoots: string[]) {
-    const results: { input?: { ok: boolean; msg: string }; output?: { ok: boolean; msg: string } } = {};
-    try {
-      const settings = loadSettings();
-      const envBase = process.env.MR_BASE_DIR || process.env.MR_BUILD_PATH;
-      const settingsBase = settings && (settings as any).composeEnvFile ? path.dirname(String((settings as any).composeEnvFile)) : undefined;
-      const baseDir = envBase || settingsBase || '/home/jt/containers/media-renamer';
-
-      // ensure base exists
-      try { fs.mkdirSync(baseDir, { recursive: true }); } catch (e) { const msg = `Could not ensure baseDir ${baseDir}: ${String(e)}`; log('error', msg); results.input = { ok: false, msg }; results.output = { ok: false, msg }; return results; }
-
-      const makeLink = (linkName: string, target?: string) => {
-        if (!target) return { ok: false, msg: 'no target provided' };
-        const linkPath = path.join(baseDir, linkName);
-        try {
-          const resolvedTarget = path.resolve(String(target));
-          // If link exists and points to same target, noop
-          try {
-            if (fs.existsSync(linkPath)) {
-              const stat = fs.lstatSync(linkPath);
-              if (stat.isSymbolicLink()) {
-                const cur = fs.readlinkSync(linkPath);
-                if (path.resolve(cur) === resolvedTarget) {
-                  const msg = `Symlink ${linkPath} already correct -> ${resolvedTarget}`;
-                  log('info', msg);
-                  return { ok: true, msg };
-                }
-              }
-              // remove existing file/dir/link
-              try { fs.rmSync(linkPath, { recursive: true, force: true }); } catch (e) { /* ignore */ }
-            }
-            // defensive: if the target itself is a symlink that points back to the
-            // linkPath (a reverse/circular link), remove it to avoid EEXIST errors
-            try {
-              if (fs.existsSync(resolvedTarget)) {
-                try {
-                  const tstat = fs.lstatSync(resolvedTarget);
-                  if (tstat.isSymbolicLink()) {
-                    const cur = fs.readlinkSync(resolvedTarget);
-                    if (path.resolve(cur) === path.resolve(linkPath)) {
-                      // remove the reverse link so we can create the intended one
-                      fs.rmSync(resolvedTarget, { recursive: true, force: true });
-                      log('info', `Removed reverse symlink ${resolvedTarget} -> ${cur}`);
-                    }
-                  }
-                } catch (e) { /* ignore errors when inspecting target */ }
-              }
-
-              // create the symlink (type 'dir' is best-effort on Windows)
-              try {
-                fs.symlinkSync(resolvedTarget, linkPath, 'dir');
-              } catch (e: any) {
-                // If EEXIST, remove any stale link at linkPath and retry once
-                if (e && e.code === 'EEXIST') {
-                  try { fs.rmSync(linkPath, { recursive: true, force: true }); } catch (er) { /* ignore */ }
-                  try { fs.symlinkSync(resolvedTarget, linkPath, 'dir'); }
-                  catch (ee) { // fallback: try without type
-                    try { fs.symlinkSync(resolvedTarget, linkPath); } catch (eee) { throw eee; }
-                  }
-                } else {
-                  // fallback: try without type
-                  try { fs.symlinkSync(resolvedTarget, linkPath); } catch (ee) { throw ee; }
-                }
-              }
-            } catch (e) {
-              const msg = `Failed to create symlink ${linkPath} -> ${resolvedTarget}: ${String(e)}`;
-              log('error', msg);
-              return { ok: false, msg };
-            }
-            const msg = `Created symlink ${linkPath} -> ${resolvedTarget}`;
-            log('info', msg);
-            return { ok: true, msg };
-          } catch (e) {
-            const msg = `Failed to create symlink ${linkPath} -> ${resolvedTarget}: ${String(e)}`;
-            log('error', msg);
-            return { ok: false, msg };
-          }
-        } catch (e) { return { ok: false, msg: String(e) }; }
-      };
-
-      results.input = makeLink('input', inputRoots && inputRoots.length ? inputRoots[0] : undefined);
-      results.output = makeLink('output', outputRoots && outputRoots.length ? outputRoots[0] : undefined);
-      return results;
-    } catch (e) {
-      const msg = `createSymlinksFromLibs failed: ${String(e)}`;
-      log('error', msg);
-      return { input: { ok: false, msg }, output: { ok: false, msg } };
-    }
-  }
+  // symlink helper removed per user request
 
   // When a file is approved, also try to find sibling files in the same
   // directory that look like the same series/season/episode but differ only
@@ -401,17 +299,8 @@ async function bootstrap() {
           const inputRoots = Array.from(new Set(body.map(b => String(b.inputRoot || '').trim()).filter(Boolean)));
           const outputRoots = Array.from(new Set(body.map(b => String((b as any).outputRoot || '').trim()).filter(Boolean)));
           try {
-            const symlinkResults = createSymlinksFromLibs(inputRoots, outputRoots);
-            // If any symlink failed, log an explicit error for visibility
-            if ((symlinkResults.input && !symlinkResults.input.ok) || (symlinkResults.output && !symlinkResults.output.ok)) {
-              log('error', `Symlink creation had failures: ${JSON.stringify(symlinkResults)}`);
-            } else {
-              log('info', `Symlink creation succeeded: ${JSON.stringify(symlinkResults)}`);
-            }
-            // include symlink results in the API response
-            reply.send({ ok: true, symlinks: symlinkResults });
-            return;
-          } catch (e) { log('warn', `createSymlinksFromLibs error: ${String(e)}`); }
+            // symlink creation intentionally removed per user request
+          } catch (e) { log('warn', `skipped symlink creation: ${String(e)}`); }
         }
       } catch (e) { log('warn', `Failed to create symlinks after saving libraries: ${String(e)}`); }
 

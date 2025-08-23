@@ -10,16 +10,6 @@ POSIX (Linux/macOS):
 PowerShell (Windows):
   scripts\make-symlinks.ps1 -InputPath <path> -OutputPath <path> [-Force]
 
-Behavior:
-- Creates links at <base-dir>/input and <base-dir>/output pointing to the provided paths.
+Symlink helpers have been removed from this repository per project policy and at the user's request.
+If you need host-side assistance for making host directories available to the container, create explicit bind mounts in your Docker Compose and ensure the container has appropriate permissions.
 - Ensure your compose file mounts the parent `<base-dir>` into the container so the links are visible inside the container.
-
-Production guidance:
-- Do not hardcode user-specific paths in these scripts. Set `MR_BASE_DIR` in your host environment or pass an explicit `base-dir` when invoking the POSIX script.
-- Run these scripts as a host user with permission to manage the target link locations.
-
-Example (Linux):
-  MR_BASE_DIR=/home/jt/containers/media-renamer ./scripts/make-symlinks.sh /mnt/sda1/Tor /data/renamed --force
-
-Example (Windows PowerShell):
-  $env:MR_BASE_DIR='C:\\Users\\jt\\containers\\media-renamer'; .\scripts\make-symlinks.ps1 -InputPath C:\\path\\to\\in -OutputPath C:\\path\\to\\out -Force
