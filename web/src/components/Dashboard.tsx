@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { FixedSizeList as List } from 'react-window';
 import debug from '../lib/debug';
 
 type Library = {
@@ -68,6 +69,11 @@ export default function Dashboard({ buttons }: DashboardProps) {
   // delay between queued fetches to keep within API limits (ms)
   const RATE_DELAY_MS = 1500; // ~40 requests/min
   const IDLE_THRESHOLD_MS = 60_000; // start idle scan after 60s of inactivity
+  // virtualization threshold: switch to react-window when list length exceeds this
+  const LIST_VIRTUALIZE_THRESHOLD = 80;
+  // initial prefetch tuning (bigger prefetch and slightly longer timeout)
+  const PREFETCH_COUNT = 20;
+  const PREFETCH_TIMEOUT_MS = 8000;
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
   useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
@@ -186,11 +192,12 @@ export default function Dashboard({ buttons }: DashboardProps) {
                 try {
                   const p = updatedItem?.path ? normalizePath(updatedItem.path) : null;
                   if (p) {
-                    scannedUpdatesRef.current.set(p, updatedItem);
-                    scannedPathsRef.current.add(p);
-                    sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries()))));
-                    sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current)));
-                  }
+                          scannedUpdatesRef.current.set(p, updatedItem);
+                          scannedPathsRef.current.add(p);
+                          sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries()))));
+                          sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current)));
+                          try { persistScannedUpdatesToServer().catch(()=>{}); } catch(e){}
+                        }
                 } catch (e) {}
               } catch (err) { /* swallow UI apply errors */ }
             }
@@ -428,6 +435,39 @@ export default function Dashboard({ buttons }: DashboardProps) {
     } catch {}
   }, []);
 
+  // Helper: persist scannedUpdatesRef merged into scanItems to server-backed cache
+  const persistScannedUpdatesToServer = useCallback(async () => {
+    try {
+      // build a merged snapshot of current scanItems with scannedUpdates applied
+      const libs = scanItemsRef.current || {};
+      const merged: Record<string, any[]> = {};
+      for (const libId of Object.keys(libs)) {
+        merged[libId] = (libs[libId] || []).map(it => {
+          try {
+            const p = it?.path ? normalizePath(it.path) : null;
+            if (p && scannedUpdatesRef.current.has(p)) return scannedUpdatesRef.current.get(p);
+          } catch (e) {}
+          return it;
+        });
+      }
+      // also include any updates for libraries not yet present
+      for (const [p, upd] of Array.from(scannedUpdatesRef.current.entries())) {
+        try {
+          const libId = String(upd?.libraryId || upd?.libId || upd?.lib || '');
+          if (!libId) continue;
+          merged[libId] = merged[libId] || [];
+          // ensure the updated item is present or replace by path
+          const exists = merged[libId].some(it => normalizePath(it.path) === p);
+          if (!exists) merged[libId].push(upd);
+        } catch (e) {}
+      }
+      // POST merged map to server scan-cache
+      try {
+        await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(merged) });
+      } catch (e) { /* best-effort */ }
+    } catch (e) {}
+  }, []);
+
   // Keep scannedPathsRef in sync with scanItems and persist to sessionStorage
   // Do not mark all scanItems as scanned. Only persist paths when an actual scanned update
   // is recorded (see fetchEpisodeTitleIfNeeded which writes scannedUpdates/scannedPaths).
@@ -499,7 +539,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
   }, []);
 
   async function scanLibrary(lib: Library) {
-    setScanningLib(lib.id);
+  setScanningLib(lib.id);
+  setScanningMap(m => ({ ...m, [lib.id]: true }));
     setScanItems(s => ({ ...s, [lib.id]: [] }));
     setScanOffset(0);
     setScanLoading(true);
@@ -516,14 +557,13 @@ export default function Dashboard({ buttons }: DashboardProps) {
       // Kick off a short initial prefetch so the first items are scanned quickly.
       // This helps when libraries are large and AUTO_PREVIEW_LIMIT prevents eager processing.
       (async () => {
-        const PREFETCH_COUNT = 10;
-        const PREFETCH_TIMEOUT_MS = 5000;
+        // PREFETCH_COUNT and PREFETCH_TIMEOUT_MS are defined higher up for tuning
         try {
           setInitialPrefetchingMap(m => ({ ...m, [lib.id]: true }));
           const start = Date.now();
           for (let i = 0; i < Math.min(PREFETCH_COUNT, items.length); i++) {
             if (Date.now() - start > PREFETCH_TIMEOUT_MS) break;
-            try { await fetchEpisodeTitleIfNeeded(lib, items[i], { silent: true }); } catch (e) { /* continue */ }
+            try { await fetchEpisodeTitleIfNeeded(lib, items[i]); } catch (e) { /* continue */ }
           }
         } finally {
           setInitialPrefetchingMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
@@ -553,7 +593,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
     } catch (e: any) {
       setError(e?.message ?? 'Scan failed');
     } finally {
-      setScanLoading(false);
+  setScanLoading(false);
+  setScanningMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
     }
   }
 
@@ -698,6 +739,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
             scannedPathsRef.current.add(normPath);
             try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
             try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+            try { persistScannedUpdatesToServer().catch(()=>{}); } catch(e){}
           }
         } else {
           if (visibleSetRef.current.has(globalKey)) {
@@ -708,6 +750,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
               scannedPathsRef.current.add(normPath);
               try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
               try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+              try { persistScannedUpdatesToServer().catch(()=>{}); } catch(e){}
             }
           } else {
             setScanItems(s => ({ ...s, [lib.id]: (s[lib.id] || []).map((it: any) => it.id === key ? updatedItem : it) }));
@@ -1041,111 +1084,44 @@ export default function Dashboard({ buttons }: DashboardProps) {
               const mapKey = `${lib.id}::${item.id}`;
               const hydrated = !!hydratedMap[mapKey];
               return (
-              <div key={item.id} data-item-id={item.id} data-lib-id={lib.id} style={{ position: 'relative' }}>
-                {!hydrated ? (
-                  // lightweight placeholder: minimal DOM and no interactive buttons
-                  <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 56, marginBottom: 8 }}>
-                    <div className="font-mono text-sm break-all">{item.path}</div>
-                  </div>
-                ) : (
-                // full render
-                <>
-              {/* checkbox positioned per-item so it aligns with this specific row */}
-              {selectMode && (
-                <div style={{ position: 'absolute', left: -56, top: '50%', transform: 'translateY(-50%)', width: 56, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <input type="checkbox" checked={!!selectedItems[item.id]} onChange={e => setSelectedItems(s => ({ ...s, [item.id]: e.target.checked }))} />
+                <div key={item.id} data-item-id={item.id} data-lib-id={lib.id} style={{ position: 'relative' }}>
+                  {!hydrated ? (
+                    <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 56, marginBottom: 8 }}>
+                      <div className="font-mono text-sm break-all">{item.path}</div>
+                    </div>
+                  ) : (
+                    <div className="card p-3 border rounded-2xl shadow-sm bg-card/60 flex items-center justify-between gap-3" style={{ minHeight: 56, marginBottom: 8 }}>
+                      <div className="flex items-start gap-3 flex-1">
+                        <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
+                        <div className="flex-1">
+                          <div className="font-mono text-base break-all">{item.path}</div>
+                          <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
+                          {fetchingEpisodeMap[item.id] && <div className="text-sm text-muted mt-1">Fetching episode title…</div>}
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-2 items-end">
+                        <div className="flex gap-2">
+                          <button className={buttons.base} onClick={() => rescanItem(lib, item)} aria-label="Rescan">🔄 Rescan</button>
+                          <button className={buttons.base} onClick={() => autoPreview(lib, item)} aria-label="Auto preview">🤖 Auto</button>
+                          <button className={buttons.base} onClick={() => searchTVDBFor(item)} aria-label="Search TVDB">🔍 Find</button>
+                          <button className={buttons.base} onClick={() => fetchEpisodeTitleIfNeeded(lib, item)} aria-label="Fetch episode title">📥 Fetch</button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input className="input text-sm" style={{ width: 140 }} placeholder="TVDB ID" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
+                          <select className="select text-sm" value={tvdbInputs[item.id]?.type ?? (item.inferred?.kind ?? 'series')} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{}), type: e.target.value as any } }))}>
+                            <option value="series">Series</option>
+                            <option value="movie">Movie</option>
+                          </select>
+                        </div>
+                        <div className="flex gap-2">
+                          <button className={buttons.base} onClick={() => approveItem(lib, item)} aria-label="Approve">✅ Approve</button>
+                          <button className={buttons.base} onClick={() => loadMore(lib)} aria-label="More">⋯ More</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-              <div className="card p-3 border rounded-2xl shadow-sm bg-card/60 flex items-center justify-between gap-3" style={{ minHeight: 56, marginBottom: 8 }}>
-                <div className="flex items-start gap-3 flex-1">
-                  <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
-                  <div className="flex-1">
-                  <div className="font-mono text-base break-all">{item.path}</div>
-                  <div className="text-sm text-muted">
-                    {(() => {
-                      const inf = item.inferred || {};
-                      const previewPlan = (previewPlans[item.id] && previewPlans[item.id].length) ? previewPlans[item.id][0] : null;
-                      let base = '';
-                      if (previewPlan && previewPlan.meta) base = String(previewPlan.meta.metadataTitle || previewPlan.meta.output || previewPlan.to || '');
-                      else if (inf.parsedName) base = String(inf.parsedName);
-                      else if (inf.kind === 'series') {
-                        const series = inf.title || '';
-                        const season = inf.season ?? 1;
-                        const ep = (inf.episode_number ?? (inf.episodes && inf.episodes[0]) ?? (inf.absolute && inf.absolute[0]));
-                        const epTitle = inf.episode_title ?? '';
-                        const pad = (n: any) => (n == null ? '00' : String(n).padStart(2, '0'));
-                        if (ep != null) base = `${series} - S${pad(season)}E${pad(ep)}${epTitle ? ' - ' + epTitle : ''}`;
-                        else base = series || inf.kind || '';
-                      } else base = inf.title || inf.kind || '';
-                      const yearVal = (previewPlan && previewPlan.meta && previewPlan.meta.year) ? previewPlan.meta.year : (inf.year ?? undefined);
-                      if (yearVal && base) {
-                        try {
-                          const yearStr = String(yearVal);
-                          const parts = String(base).split(' - ');
-                          const prefix = parts.shift() || '';
-                          const rest = parts.join(' - ');
-                          const yearRegex = new RegExp(`\\(\\s*${yearStr}\\s*\\)$`);
-                          if (inf.kind === 'series') {
-                            let newPrefix = prefix;
-                            if (!yearRegex.test(prefix)) newPrefix = `${prefix} (${yearStr})`;
-                            base = rest ? `${newPrefix} - ${rest}` : newPrefix;
-                          } else {
-                            if (!yearRegex.test(base)) base = `${base} (${yearStr})`;
-                          }
-                        } catch (e) {}
-                      }
-                      return base;
-                    })()}
-                  </div>
-                  {(() => {
-                    const previewPlan = (previewPlans[item.id] && previewPlans[item.id].length) ? previewPlans[item.id][0] : null;
-                    if (previewPlan && previewPlan.meta && previewPlan.meta.output) {
-                      try {
-                        const out = String(previewPlan.meta.output || '');
-                        const parts = splitPath(out);
-                        const last3 = parts.slice(-3).join('/');
-                        return <div className="text-sm text-muted mt-1"><code>{last3}</code></div>;
-                      } catch (e) { }
-                    }
-                    if (item.inferred?.jellyfinExample) return <div className="text-sm text-muted mt-1"><code>{item.inferred.jellyfinExample}</code></div>;
-                    return null;
-                  })()}
-                  {fetchingEpisodeMap[item.id] && <div className="text-sm text-muted mt-1">Fetching episode title…</div>}
-                </div>
-              </div>
-              <div className="flex flex-col gap-2 items-end">
-                <div className="flex gap-2">
-                  <button className={buttons.base} onClick={() => rescanItem(lib, item)} aria-label="Rescan">🔄 Rescan</button>
-                  <button className={buttons.base} onClick={() => autoPreview(lib, item)} aria-label="Auto preview">🤖 Auto</button>
-                  <button className={buttons.base} onClick={() => searchTVDBFor(item)} aria-label="Search TVDB">🔍 Find</button>
-                  <button className={buttons.base} onClick={() => fetchEpisodeTitleIfNeeded(lib, item)} aria-label="Fetch episode title">📥 Fetch</button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input className="input text-sm" style={{ width: 140 }} placeholder="TVDB ID" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
-                  <select className="select text-sm" value={tvdbInputs[item.id]?.type ?? (item.inferred?.kind ?? 'series')} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{}), type: e.target.value as any } }))}>
-                    <option value="series">Series</option>
-                    <option value="movie">Movie</option>
-                  </select>
-                  <button className={buttons.base} onClick={async () => {
-                    try {
-                      const tv = tvdbInputs[item.id];
-                      if (!tv || !tv.id) { setError('Enter a TVDB ID'); return; }
-                      const res = await fetch('/api/approve-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ libraryId: lib.id, path: item.path, tvdbId: Number(tv.id), type: tv.type }) });
-                      if (!res.ok) throw new Error(`Save failed (${res.status})`);
-                      setApproved(a => ({ ...a, [item.path]: true }));
-                    } catch (e: any) { setError(e?.message ?? 'Save failed'); }
-                  }}>💾 Save</button>
-                </div>
-                <div className="flex gap-2">
-                  <button className={buttons.base} onClick={() => approveItem(lib, item)} aria-label="Approve">✅ Approve</button>
-                  <button className={buttons.base} onClick={() => loadMore(lib)} aria-label="More">⋯ More</button>
-                </div>
-              </div>
-              </div>
-                </>
-                )}
-              </div>
-            );
+              );
             })
           )}
         </div>
