@@ -1,0 +1,13 @@
+Checkpoint: Dashboard checkbox gutter layout
+Date: 2025-08-17
+Summary:
+- Rendered absolute-positioned left gutter (56px) with checkbox per item.
+- Card is shifted right via marginLeft:56 so it doesn't drop below the gutter.
+- Spacer added to align checkboxes with card header.
+- Item rows modified to have minHeight 56 and marginBottom 8.
+Files touched:
+- web/src/components/Dashboard.tsx (gutter + renderLibraryCard changes)
+Next action taken after checkpoint:
+- Adjusted item row vertical alignment from "items-start" to "items-center" to center content vertically so checkboxes align with the middle of each entry.
+
+This is an automated checkpoint saved before further layout iterations.

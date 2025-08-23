@@ -135,6 +135,36 @@ export async function getSeries(seriesId: number) {
 // Helper: pick a preferred human-friendly name from raw TVDB series/movie object
 function pickPreferredName(d: any) {
   const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
+  // Helper: choose the best alias from an array of aliases (objects or strings)
+  function pickBestAlias(aliases: any[]): string | undefined {
+    if (!aliases || !aliases.length) return undefined;
+    const cand = aliases.map(a => {
+      if (!a) return null;
+      if (typeof a === 'string') return { name: a, lang: undefined };
+      const name = a.name || a.title || a.translation || a.value || a.alias;
+      const lang = a.language || a.iso_639_3 || a.lang;
+      return { name, lang };
+    }).filter(Boolean) as Array<{name: any, lang?: any}>;
+    const filtered = cand.map(c => ({ s: String(c.name || ''), lang: c.lang })).filter(x => x.s && !cjkRe.test(x.s));
+    if (!filtered.length) return undefined;
+    function score(s: string) {
+      let sc = 0;
+      const len = s.length;
+      // prefer ASCII-only aliases
+      if (/^[\x00-\x7F]*$/.test(s)) sc += 40;
+      // prefer aliases containing a colon (often the short English title)
+      if (s.includes(':')) sc += 20;
+      // prefer reasonable length (around 20-40 chars)
+      sc -= Math.abs(len - 30);
+      // prefer title-cased tokens (small boost)
+      if (/[A-Z][a-z]/.test(s)) sc += 5;
+      // penalize excessive punctuation/quote characters
+      if (/[“”‘’]/.test(s)) sc -= 5;
+      return sc;
+    }
+    filtered.sort((a, b) => score(b.s) - score(a.s));
+    return filtered[0].s;
+  }
   // Avoid depending on the exact shape of the exported `Settings` type from
   // `settings.ts` (some branches or CI snapshots may not include
   // `tvdbLanguage`). Cast to a local, explicit shape that makes the
@@ -172,16 +202,9 @@ function pickPreferredName(d: any) {
   if (!preferred && d.aliases) {
     const aliases = d.aliases;
     if (Array.isArray(aliases) && aliases.length) {
-      if (typeof aliases[0] === 'object') {
-        for (const p of preferLangs) {
-          const found = (aliases as any[]).find((a: any) => (a.language && a.language.toString().toLowerCase().startsWith(p)) || (a.iso_639_3 && a.iso_639_3.toString().toLowerCase() === p));
-          if (found && (found.name || found.title || found.translation)) { preferred = found.name || found.title || found.translation; break; }
-        }
-        if (preferred) pickedSource = 'alias';
-      } else {
-        const nonCjk = (aliases as string[]).find(s => !cjkRe.test((s||'').toString()));
-        if (nonCjk) { preferred = nonCjk; pickedSource = 'alias'; }
-      }
+  // Use the best-scoring alias instead of simply taking the first one.
+  const best = pickBestAlias(aliases as any[]);
+  if (best) { preferred = best; pickedSource = 'alias'; }
     }
   }
   let name = d.name || d.title || preferred || d.slug || '';

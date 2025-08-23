@@ -90,6 +90,30 @@ export function episodeOutputPath(
   const settings = loadSettings();
   const chooseDisplayName = (s: MatchCandidate) => {
     const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
+    function pickBestAliasFromAudit(aliases: any[]): string | undefined {
+      if (!aliases || !aliases.length) return undefined;
+      const cand = aliases.map(a => {
+        if (!a) return null;
+        if (typeof a === 'string') return { name: a, lang: undefined };
+        const name = a.name || a.title || a.translation || a.value || a.alias;
+        const lang = a.language || a.iso_639_3 || a.lang;
+        return { name, lang };
+      }).filter(Boolean) as Array<{name: any, lang?: any}>;
+      const filtered = cand.map(c => ({ s: String(c.name || ''), lang: c.lang })).filter(x => x.s && !cjkRe.test(x.s));
+      if (!filtered.length) return undefined;
+      function score(s: string) {
+        let sc = 0;
+        const len = s.length;
+        if (/^[\x00-\x7F]*$/.test(s)) sc += 40;
+        if (s.includes(':')) sc += 20;
+        sc -= Math.abs(len - 30);
+        if (/[A-Z][a-z]/.test(s)) sc += 5;
+        if (/[“”‘’]/.test(s)) sc -= 5;
+        return sc;
+      }
+      filtered.sort((a, b) => score(b.s) - score(a.s));
+      return filtered[0].s;
+    }
     try {
       const audit = (s as any)?.extra?.audit;
       // 1) if server already picked a translation/alias, use it
@@ -104,18 +128,8 @@ export function episodeOutputPath(
 
       // 3) try aliases (object entries)
       if (audit?.aliases && Array.isArray(audit.aliases) && audit.aliases.length) {
-        const firstObj = audit.aliases[0];
-        if (typeof firstObj === 'object') {
-          const prefer = ['en','eng','en-us','en-gb','romaji'];
-          for (const p of prefer) {
-            const found = (audit.aliases as any[]).find((a:any)=> a && (String(a.language||'').toLowerCase().startsWith(p) || String(a.iso_639_3||'').toLowerCase()===p));
-            if (found && (found.name || found.title)) return String(found.name || found.title || found.translation || '');
-          }
-        } else {
-          // aliases are strings: prefer the first non-CJK alias
-          const nonCjk = (audit.aliases as string[]).find((x:any)=> !cjkRe.test(String(x||'')));
-          if (nonCjk) return String(nonCjk);
-        }
+        const best = pickBestAliasFromAudit(audit.aliases as any[]);
+        if (best) return String(best);
       }
 
       // 4) fallback: prefer slug or original name unless it's CJK and no translation found
@@ -128,6 +142,7 @@ export function episodeOutputPath(
   } catch (e) { return String(s.name || (s as any).slug || ''); }
   };
   const rawDisplayName = chooseDisplayName(series);
+  try { log('debug', `[episodeOutputPath] DIAG: rawDisplayName='${rawDisplayName}', series.extra=${JSON.stringify((series as any).extra||{})}`); } catch {}
   const seriesName = sanitize(rawDisplayName || series.name || '');
   let year = series.year ? String(series.year) : '';
   let debugSource = 'series.year';
