@@ -111,6 +111,15 @@ function pickPreferredEpisodeName(e: any, langOverride?: string) {
   const settingsLang = (langOverride || settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
   const preferLangs = [settingsLang, 'en', 'eng', 'en-us', 'en-gb', 'romaji', 'ja-latn', 'zh', 'zh-cn', 'zh-tw', 'chi'];
   const tr = e.translations || e.translatedNames || e.translationsMap;
+  try {
+    // Log a short summary for diagnostics
+    const summary = {
+      id: e.id || e.episodeId || undefined,
+      name: e.name || e.episodeName || e.title,
+      translations: Array.isArray(tr) ? tr.map((t:any)=> ({ language: t.language, k: t.iso_639_3 })) : (tr ? Object.keys(tr || {}) : undefined)
+    };
+    try { log('debug', `pickPreferredEpisodeName: summary=${JSON.stringify(summary).slice(0,800)}`); } catch {}
+  } catch (e) {}
   let preferred: string | undefined;
   if (tr) {
     if (Array.isArray(tr)) {
@@ -134,12 +143,14 @@ function pickPreferredEpisodeName(e: any, langOverride?: string) {
   }
   // fallback to name/episodeName
   if (!preferred) preferred = e.name || e.episodeName || e.title || undefined;
+  try { log('debug', `pickPreferredEpisodeName: picked='${preferred}' for langOverride='${langOverride || ''}'`); } catch {}
   return preferred;
 }
 
 export async function getEpisodePreferredTitle(seriesId: number, season: number, episode: number, lang?: string) {
   const m = await getEpisodeByAiredOrder(seriesId, season, episode);
   if (!m) return null;
+  try { log('info', `getEpisodePreferredTitle: series=${seriesId} season=${season} ep=${episode} requestedLang=${lang || ''}`); } catch {}
   const picked = pickPreferredEpisodeName(m, lang);
   // determine source for diagnostics
   let source = 'name';
@@ -147,6 +158,7 @@ export async function getEpisodePreferredTitle(seriesId: number, season: number,
     if (m.translations && picked && String(picked) !== String(m.name)) source = 'translation';
     else source = 'name';
   } catch {}
+  try { log('info', `getEpisodePreferredTitle: chosen='${picked}' source=${source} series=${seriesId} s=${season} e=${episode}`); } catch {}
   return { title: (picked || (m.name || m.episodeName || null)), source };
 }
 
