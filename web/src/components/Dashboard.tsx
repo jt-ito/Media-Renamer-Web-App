@@ -22,6 +22,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [openLibPanels, setOpenLibPanels] = useState<Record<string, boolean>>({});
   const [searchResults, setSearchResults] = useState<Record<string, any[]>>({});
   const [previewPlans, setPreviewPlans] = useState<Record<string, any[]>>({});
+  const [initialPrefetchingMap, setInitialPrefetchingMap] = useState<Record<string, boolean>>({});
   const [hydratedMap, setHydratedMap] = useState<Record<string, boolean>>({});
   const hydratedMapRef = useRef(hydratedMap);
   const [tvdbInputs, setTvdbInputs] = useState<Record<string, { id?: number | string; type: 'movie'|'series' }>>({});
@@ -512,6 +513,22 @@ export default function Dashboard({ buttons }: DashboardProps) {
       const data = await res.json();
       const items = data.items || [];
       setScanItems(s => ({ ...s, [lib.id]: items }));
+      // Kick off a short initial prefetch so the first items are scanned quickly.
+      // This helps when libraries are large and AUTO_PREVIEW_LIMIT prevents eager processing.
+      (async () => {
+        const PREFETCH_COUNT = 10;
+        const PREFETCH_TIMEOUT_MS = 5000;
+        try {
+          setInitialPrefetchingMap(m => ({ ...m, [lib.id]: true }));
+          const start = Date.now();
+          for (let i = 0; i < Math.min(PREFETCH_COUNT, items.length); i++) {
+            if (Date.now() - start > PREFETCH_TIMEOUT_MS) break;
+            try { await fetchEpisodeTitleIfNeeded(lib, items[i], { silent: true }); } catch (e) { /* continue */ }
+          }
+        } finally {
+          setInitialPrefetchingMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
+        }
+      })();
       // If the library is large, skip eager auto-preview to avoid hammering the client/network.
       const AUTO_PREVIEW_LIMIT = 30;
       try {
@@ -1001,6 +1018,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
           </div>
           <div>
             <button className={buttons.base} onClick={() => scanLibrary(lib)} disabled={!!scanningMap[lib.id]}>Scan</button>
+            {initialPrefetchingMap[lib.id] && <span className="ml-2 text-sm text-muted">Prefetching…</span>}
             {previewSkippedMap[lib.id] && (
               <button className={buttons.base} onClick={() => previewAllThrottled(lib)} disabled={!!previewingMap[lib.id]}>Preview all (throttled)</button>
             )}
