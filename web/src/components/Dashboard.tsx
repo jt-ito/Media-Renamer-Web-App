@@ -22,6 +22,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [openLibPanels, setOpenLibPanels] = useState<Record<string, boolean>>({});
   const [searchResults, setSearchResults] = useState<Record<string, any[]>>({});
   const [previewPlans, setPreviewPlans] = useState<Record<string, any[]>>({});
+  const [hydratedMap, setHydratedMap] = useState<Record<string, boolean>>({});
+  const hydratedMapRef = useRef(hydratedMap);
   const [tvdbInputs, setTvdbInputs] = useState<Record<string, { id?: number | string; type: 'movie'|'series' }>>({});
   const [rescaningMap, setRescaningMap] = useState<Record<string, boolean>>({});
   const [applying, setApplying] = useState(false);
@@ -67,6 +69,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const IDLE_THRESHOLD_MS = 60_000; // start idle scan after 60s of inactivity
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
+  useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
 
   const enqueueScan = useCallback((libId: string, itemId: string, front = false, silent = false) => {
   // update last activity (user triggered)
@@ -134,6 +137,10 @@ export default function Dashboard({ buttons }: DashboardProps) {
           if (e.isIntersecting) {
             // mark visible and prioritize scanning (silent so UI fetching indicator is not shown)
             visibleSetRef.current.add(key);
+            // mark as hydrated so the full UI is rendered for this item
+            try {
+              setHydratedMap(m => ({ ...m, [key]: true }));
+            } catch (e) {}
             // Try to perform an immediate, silent fetch for visible items so they hit the API right away.
             try {
               const libs = scanItemsRef.current || {};
@@ -159,7 +166,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
                     }
                   })();
                 }
-              } else {
+                } else {
                 // fallback to enqueue when we don't have the item object available yet
                 enqueueScan(libId, itemId, true, true);
               }
@@ -421,19 +428,15 @@ export default function Dashboard({ buttons }: DashboardProps) {
   }, []);
 
   // Keep scannedPathsRef in sync with scanItems and persist to sessionStorage
+  // Do not mark all scanItems as scanned. Only persist paths when an actual scanned update
+  // is recorded (see fetchEpisodeTitleIfNeeded which writes scannedUpdates/scannedPaths).
+  // This prevents un-renamed items from being treated as scanned.
   useEffect(() => {
     try {
-      const paths: string[] = [];
-      for (const libId of Object.keys(scanItems || {})) {
-        const items = (scanItems as any)[libId] || [];
-        for (const it of items) {
-          if (it && it.path) paths.push(normalizePath(it.path));
-        }
-      }
-      for (const p of paths) scannedPathsRef.current.add(p);
+      // Persist current scannedPaths (which should only contain paths added by fetchEpisodeTitleIfNeeded)
       try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
     } catch (e) {}
-  }, [scanItems]);
+  }, [/* intentionally run when scanItems changes to flush current scannedPaths */ scanItems]);
 
   // When scanItems change, if we have persisted scannedUpdates, merge them into state so UI shows saved titles
   useEffect(() => {
@@ -480,9 +483,6 @@ export default function Dashboard({ buttons }: DashboardProps) {
                 if (scannedPathsRef.current.has(path)) continue;
                 // Enqueue without front prioritization; idle worker should be quiet (silent)
                 enqueueScan(libId, it.id, false, true);
-                // mark path immediately to avoid re-enqueue races
-                scannedPathsRef.current.add(path);
-                try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
                 // yield a tick to avoid hogging CPU/network; no global rate limit per request
                 await new Promise(r => setTimeout(r, 250));
               } catch (e) {}
@@ -1019,8 +1019,19 @@ export default function Dashboard({ buttons }: DashboardProps) {
           {itemsToShow.length === 0 ? (
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
-            itemsToShow.map(item => (
-            <div key={item.id} data-item-id={item.id} data-lib-id={lib.id} style={{ position: 'relative' }}>
+            itemsToShow.map(item => {
+              const mapKey = `${lib.id}::${item.id}`;
+              const hydrated = !!hydratedMap[mapKey];
+              return (
+              <div key={item.id} data-item-id={item.id} data-lib-id={lib.id} style={{ position: 'relative' }}>
+                {!hydrated ? (
+                  // lightweight placeholder: minimal DOM and no interactive buttons
+                  <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 56, marginBottom: 8 }}>
+                    <div className="font-mono text-sm break-all">{item.path}</div>
+                  </div>
+                ) : (
+                // full render
+                <>
               {/* checkbox positioned per-item so it aligns with this specific row */}
               {selectMode && (
                 <div style={{ position: 'absolute', left: -56, top: '50%', transform: 'translateY(-50%)', width: 56, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1113,8 +1124,11 @@ export default function Dashboard({ buttons }: DashboardProps) {
                 </div>
               </div>
               </div>
-            </div>
-            ))
+                </>
+                )}
+              </div>
+            );
+            })
           )}
         </div>
       </div>
