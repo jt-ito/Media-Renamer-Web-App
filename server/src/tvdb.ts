@@ -68,7 +68,12 @@ export async function searchTVDB(type: MediaType, query: string, year?: number):
     // translation exists, prefer the English/romaji one.
     const cjkRe = /[\u3040-\u30ff\u4e00-\u9fff]/;
     function pickPreferredName(d: any) {
-  const settingsLang = (loadSettings().tvdbLanguage || 'en').toString().toLowerCase();
+  // Avoid depending on the exact shape of the exported `Settings` type from
+  // `settings.ts` (some branches or CI snapshots may not include
+  // `tvdbLanguage`). Cast to a local, explicit shape that makes the
+  // optionality clear while keeping strict typing for the rest of this file.
+  const settingsLocal = loadSettings() as { tvdbLanguage?: string };
+  const settingsLang = (settingsLocal.tvdbLanguage || 'en').toString().toLowerCase();
       // try translations in several shapes
       const tr = d.translations;
       // Build a preference list starting with the user's preferred language
