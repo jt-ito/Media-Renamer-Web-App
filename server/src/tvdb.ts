@@ -150,16 +150,29 @@ function pickPreferredEpisodeName(e: any, langOverride?: string) {
 export async function getEpisodePreferredTitle(seriesId: number, season: number, episode: number, lang?: string) {
   const m = await getEpisodeByAiredOrder(seriesId, season, episode);
   if (!m) return null;
-  try { log('info', `getEpisodePreferredTitle: series=${seriesId} season=${season} ep=${episode} requestedLang=${lang || ''}`); } catch {}
-  const picked = pickPreferredEpisodeName(m, lang);
+  try { log('info', `getEpisodePreferredTitle: series=${seriesId} season=${season} ep=${episode} requestedLang=${lang || ''} rawEpisodeHasTranslations=${!!(m && (m.translations||m.translatedNames||m.translationsMap))}`); } catch {}
+
+  // If the lightweight episode object doesn't include translations, request full episode details
+  let episodeObj = m;
+  if (!(m && (m.translations || m.translatedNames || m.translationsMap))) {
+    try {
+      const full = await tvdb(`/episodes/${m.id || m.episodeId || m.episode_id}`);
+      episodeObj = (full && full.data) ? full.data : full;
+      try { log('debug', `getEpisodePreferredTitle: fetched full episode object for id=${m.id||m.episodeId||m.episode_id}`); } catch {}
+    } catch (e) {
+      try { log('debug', `getEpisodePreferredTitle: could not fetch full episode object: ${String(e)}`); } catch {}
+    }
+  }
+
+  const picked = pickPreferredEpisodeName(episodeObj, lang);
   // determine source for diagnostics
   let source = 'name';
   try {
-    if (m.translations && picked && String(picked) !== String(m.name)) source = 'translation';
+    if ((episodeObj.translations || episodeObj.translatedNames || episodeObj.translationsMap) && picked && String(picked) !== String(episodeObj.name)) source = 'translation';
     else source = 'name';
   } catch {}
   try { log('info', `getEpisodePreferredTitle: chosen='${picked}' source=${source} series=${seriesId} s=${season} e=${episode}`); } catch {}
-  return { title: (picked || (m.name || m.episodeName || null)), source };
+  return { title: (picked || (episodeObj.name || episodeObj.episodeName || null)), source };
 }
 
 export async function mapAbsoluteToAired(seriesId: number, abs: number[]) {
