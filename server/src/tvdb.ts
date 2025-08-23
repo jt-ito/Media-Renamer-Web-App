@@ -207,6 +207,42 @@ export async function getEpisodePreferredTitle(seriesId: number, season: number,
     }
   }
 
+  // Some TVDB responses provide only `nameTranslations` (array of language codes)
+  // on the episode object but not the actual translated strings. If we see
+  // language codes but no translation entries, attempt to fetch the
+  // translations endpoint for this episode so we can choose the requested
+  // language string (for example: 'eng'/'en' or 'romaji').
+  try {
+    const hasNameCodes = !!(episodeObj && (episodeObj.nameTranslations || episodeObj.name_translations));
+    const hasTranslationEntries = !!(episodeObj && (episodeObj.translations || episodeObj.translatedNames || episodeObj.translationsMap));
+    if (hasNameCodes && !hasTranslationEntries && (episodeObj.id || episodeObj.episodeId || episodeObj.episode_id)) {
+      try {
+        const tid = episodeObj.id || episodeObj.episodeId || episodeObj.episode_id;
+        const transRes = await tvdb(`/episodes/${tid}/translations`);
+        const transData = transRes && transRes.data ? transRes.data : transRes;
+        if (transData) {
+          // Normalize into an array of { language, name/title/translation }
+          let arr: any[] = [];
+          if (Array.isArray(transData)) arr = transData;
+          else if (transData.translations && Array.isArray(transData.translations)) arr = transData.translations;
+          else if (transData.data && Array.isArray(transData.data)) arr = transData.data;
+          // Map common shapes to a normalized translations array
+          const normalized = arr.map((t: any) => {
+            const language = (t.language || t.lang || t.iso_639_3 || t.iso || '').toString();
+            const name = (t.name || t.title || t.translation || t.value || (t.data && t.data.name) || null);
+            return { language, name, raw: t };
+          }).filter(Boolean);
+          if (normalized.length) {
+            try { episodeObj.translations = normalized; } catch {}
+            try { log('debug', `getEpisodePreferredTitle: fetched ${normalized.length} translation entries for episode id=${tid}`); } catch {}
+          }
+        }
+      } catch (e) {
+        try { log('debug', `getEpisodePreferredTitle: translations fetch failed for episode id=${episodeObj.id||episodeObj.episodeId||episodeObj.episode_id}: ${String(e)}`); } catch {}
+      }
+    }
+  } catch (e) { /* best-effort */ }
+
   const picked = pickPreferredEpisodeName(episodeObj, lang);
   // determine source for diagnostics
   let source = 'name';
