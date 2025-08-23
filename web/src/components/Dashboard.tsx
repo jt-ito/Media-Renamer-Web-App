@@ -48,15 +48,36 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const scanItemsRef = useRef(scanItems);
   const observerRef = useRef<IntersectionObserver | null>(null);
   const shownLibrariesRef = useRef<typeof shownLibraries | null>(null);
+  // keep track of which items are currently visible in the viewport
+  const visibleSetRef = useRef(new Set<string>());
+  // pending updates for items that were fetched while visible — apply when they leave view
+  const pendingUpdatesRef = useRef(new Map<string, any>());
+  // set of normalized paths that have already been scanned (to avoid repeats)
+  const scannedPathsRef = useRef(new Set<string>());
+  // last user activity timestamp (manual scan, scroll, etc.)
+  const lastActivityRef = useRef<number>(Date.now());
+  // prevent concurrent idle workers
+  const idleWorkerRef = useRef(false);
+  // map of normalized path -> updated item (persisted immediately when discovered)
+  const scannedUpdatesRef = useRef(new Map<string, any>());
   // delay between queued fetches to keep within API limits (ms)
   const RATE_DELAY_MS = 1500; // ~40 requests/min
+  const IDLE_THRESHOLD_MS = 60_000; // start idle scan after 60s of inactivity
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
 
   const enqueueScan = useCallback((libId: string, itemId: string, front = false) => {
-    const key = `${libId}::${itemId}`;
-    if (scanQueuedSetRef.current.has(key)) return;
-    scanQueuedSetRef.current.add(key);
+  // update last activity (user triggered)
+  try { lastActivityRef.current = Date.now(); } catch {}
+  const key = `${libId}::${itemId}`;
+  // find item path and skip if already scanned (unless forced)
+  const libs = scanItemsRef.current || {};
+  const items = libs[libId] || [];
+  const it = items.find((x: any) => String(x.id) === String(itemId));
+  const maybePath = it?.path ? normalizePath(it.path) : null;
+  if (maybePath && scannedPathsRef.current.has(maybePath)) return;
+  if (scanQueuedSetRef.current.has(key)) return;
+  scanQueuedSetRef.current.add(key);
     const entry = { libId, itemId } as ScanQueueItem;
     if (front) scanQueueRef.current.unshift(entry);
     else scanQueueRef.current.push(entry);
@@ -103,11 +124,34 @@ export default function Dashboard({ buttons }: DashboardProps) {
     observerRef.current = new IntersectionObserver(entries => {
       for (const e of entries) {
         try {
+          const el = e.target as HTMLElement;
+          const itemId = el.getAttribute('data-item-id');
+          const libId = el.getAttribute('data-lib-id');
+          if (!itemId || !libId) continue;
+          const key = `${libId}::${itemId}`;
           if (e.isIntersecting) {
-            const el = e.target as HTMLElement;
-            const itemId = el.getAttribute('data-item-id');
-            const libId = el.getAttribute('data-lib-id');
-            if (itemId && libId) enqueueScan(libId, itemId, true);
+            // mark visible and prioritize scanning
+            visibleSetRef.current.add(key);
+            enqueueScan(libId, itemId, true);
+          } else {
+            // left view: remove from visible set and, if we have a pending update, apply it now
+            visibleSetRef.current.delete(key);
+            if (pendingUpdatesRef.current.has(key)) {
+              const updatedItem = pendingUpdatesRef.current.get(key);
+              pendingUpdatesRef.current.delete(key);
+              try {
+                setScanItems(s => ({ ...s, [libId]: (s[libId] || []).map((it: any) => String(it.id) === String(itemId) ? updatedItem : it) }));
+                try {
+                  const p = updatedItem?.path ? normalizePath(updatedItem.path) : null;
+                  if (p) {
+                    scannedUpdatesRef.current.set(p, updatedItem);
+                    scannedPathsRef.current.add(p);
+                    sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries()))));
+                    sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current)));
+                  }
+                } catch (e) {}
+              } catch (err) { /* swallow UI apply errors */ }
+            }
           }
         } catch (err) {}
       }
@@ -318,6 +362,107 @@ export default function Dashboard({ buttons }: DashboardProps) {
   // Sync ref for shownLibraries used by the background scanner
   useEffect(() => { try { shownLibrariesRef.current = shownLibraries as any; } catch {} }, [shownLibraries]);
 
+  // Initialize scannedPathsRef from sessionStorage or current scanItems
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('dashboard.scannedPaths');
+      if (raw) {
+        const arr = JSON.parse(raw) as string[];
+        scannedPathsRef.current = new Set((arr || []).map(normalizePath));
+      }
+    } catch {}
+  }, []);
+
+  // Initialize scannedUpdatesRef from sessionStorage
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('dashboard.scannedUpdates');
+      if (raw) {
+        const obj = JSON.parse(raw) as Record<string, any>;
+        const m = new Map<string, any>();
+        for (const k of Object.keys(obj || {})) m.set(normalizePath(k), obj[k]);
+        scannedUpdatesRef.current = m;
+      }
+    } catch {}
+  }, []);
+
+  // Keep scannedPathsRef in sync with scanItems and persist to sessionStorage
+  useEffect(() => {
+    try {
+      const paths: string[] = [];
+      for (const libId of Object.keys(scanItems || {})) {
+        const items = (scanItems as any)[libId] || [];
+        for (const it of items) {
+          if (it && it.path) paths.push(normalizePath(it.path));
+        }
+      }
+      for (const p of paths) scannedPathsRef.current.add(p);
+      try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+    } catch (e) {}
+  }, [scanItems]);
+
+  // When scanItems change, if we have persisted scannedUpdates, merge them into state so UI shows saved titles
+  useEffect(() => {
+    try {
+      if (!scanItems) return;
+      const updates = scannedUpdatesRef.current;
+      if (!updates || updates.size === 0) return;
+      let applied = false;
+      const next: Record<string, any[]> = {};
+      for (const libId of Object.keys(scanItems || {})) {
+        const items = (scanItems as any)[libId] || [];
+        next[libId] = items.map((it: any) => {
+          const p = it?.path ? normalizePath(it.path) : null;
+          if (p && updates.has(p)) { applied = true; return updates.get(p); }
+          return it;
+        });
+      }
+      if (applied) setScanItems(next);
+    } catch (e) {}
+  }, [scanItems]);
+
+  // Idle scanner: when the user has been inactive for IDLE_THRESHOLD_MS, slowly walk unscanned items and enqueue them
+  useEffect(() => {
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const idleFor = Date.now() - (lastActivityRef.current || 0);
+        if (idleFor < IDLE_THRESHOLD_MS) return; // not idle yet
+        if (idleWorkerRef.current) return; // already running
+        idleWorkerRef.current = true;
+        try {
+          // Build a list of candidate items across libraries
+          const libs = scanItemsRef.current || {};
+          for (const libId of Object.keys(libs)) {
+            if (stopped) break;
+            const items = libs[libId] || [];
+            for (const it of items) {
+              if (stopped) break;
+              try {
+                const path = it?.path ? normalizePath(it.path) : null;
+                const key = `${libId}::${it.id}`;
+                if (!path) continue;
+                if (scannedPathsRef.current.has(path)) continue;
+                // Enqueue without front prioritization; idle worker should be quiet
+                enqueueScan(libId, it.id, false);
+                // mark path immediately to avoid re-enqueue races
+                scannedPathsRef.current.add(path);
+                try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+                // yield a tick to avoid hogging CPU/network; no global rate limit per request
+                await new Promise(r => setTimeout(r, 250));
+              } catch (e) {}
+            }
+          }
+        } finally { idleWorkerRef.current = false; }
+      } catch (e) {}
+    };
+    const int = setInterval(tick, 5000);
+    // also run once immediately to check
+    void tick();
+    return () => { stopped = true; clearInterval(int); };
+  }, []);
+
   async function scanLibrary(lib: Library) {
     setScanningLib(lib.id);
     setScanItems(s => ({ ...s, [lib.id]: [] }));
@@ -490,9 +635,28 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const base = inf.title || (inf.parsedName ? String(inf.parsedName).split(' - ')[0] : '');
         newInferred.parsedName = `${base} - S${paddedS}E${paddedE} - ${title}`;
         newInferred.jellyfinExample = `${base}/Season ${paddedS}/${base} - S${paddedS}E${paddedE} - ${title}`;
-        // write back
+        // write back — defer applying UI updates if item is currently visible to avoid flicker
         const updatedItem = { ...item, inferred: newInferred };
-        setScanItems(s => ({ ...s, [lib.id]: (s[lib.id] || []).map((it: any) => it.id === key ? updatedItem : it) }));
+        const globalKey = `${lib.id}::${key}`;
+        const normPath = item?.path ? normalizePath(item.path) : null;
+        if (visibleSetRef.current.has(globalKey)) {
+          // keep in-memory pending update; will be applied when item leaves view
+          pendingUpdatesRef.current.set(globalKey, updatedItem);
+          if (normPath) {
+            scannedUpdatesRef.current.set(normPath, updatedItem);
+            scannedPathsRef.current.add(normPath);
+            try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
+            try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+          }
+        } else {
+          setScanItems(s => ({ ...s, [lib.id]: (s[lib.id] || []).map((it: any) => it.id === key ? updatedItem : it) }));
+          if (normPath) {
+            scannedUpdatesRef.current.set(normPath, updatedItem);
+            scannedPathsRef.current.add(normPath);
+            try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
+            try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
+          }
+        }
         return updatedItem;
       }
     } catch (err) {
