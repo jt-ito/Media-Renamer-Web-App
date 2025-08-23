@@ -991,6 +991,41 @@ async function bootstrap() {
     try {
       const body = req.body as { level?: string };
       const lvl = (body && String(body.level || '').toLowerCase()) as any;
+
+  // Scan-cache file endpoints: persist scan results to disk so the UI can
+  // restore them across navigation and server restarts. Path may be overridden
+  // with SCAN_CACHE_PATH env var (useful for Docker setups).
+  const SCAN_CACHE_PATH = process.env.SCAN_CACHE_PATH || path.resolve(__dirname, '..', 'config', 'scan-cache.json');
+
+  app.get('/api/scan-cache', async () => {
+    try {
+      if (!fs.existsSync(SCAN_CACHE_PATH)) return {};
+      const raw = fs.readFileSync(SCAN_CACHE_PATH, 'utf8') || '{}';
+      try { return JSON.parse(raw); } catch { return {}; }
+    } catch (e) {
+      return {};
+    }
+  });
+
+  app.post('/api/scan-cache', async (req, reply) => {
+    try {
+      const body = req.body || {};
+      fs.mkdirSync(path.dirname(SCAN_CACHE_PATH), { recursive: true });
+      fs.writeFileSync(SCAN_CACHE_PATH, JSON.stringify(body || {}, null, 2), 'utf8');
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      return reply.status(500).send({ error: String(e?.message || e) });
+    }
+  });
+
+  app.delete('/api/scan-cache', async () => {
+    try {
+      if (fs.existsSync(SCAN_CACHE_PATH)) fs.unlinkSync(SCAN_CACHE_PATH);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  });
       if (!['info','warn','error','debug'].includes(lvl)) return reply.status(400).send({ error: 'invalid level' });
       const { setLogLevel } = await import('./logging.js');
       setLogLevel(lvl);

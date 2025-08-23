@@ -3,18 +3,14 @@ import path from 'path';
 import { Library, MatchCandidate, RenamePlan, ScanItem, MediaType } from './types.js';
 import { loadSettings } from './settings.js';
 import { log } from './logging.js';
-import { getSeries } from './tvdb.js';
+import { getSeries, getEpisodeByAiredOrder } from './tvdb.js';
 
 function sanitize(s: string) {
   if (!s) return '';
-  // Preserve original characters and capitalization where possible.
-  // Only remove characters that are illegal in Windows file names and
-  // collapse excessive whitespace. This keeps episode/series titles
-  // identical to the source except for filesystem safety.
   const str = String(s);
-  // Remove explicitly illegal characters for Windows/most filesystems
-  const cleaned = str.replace(/[<>:\"/\\|?*\u0000-\u001F]/g, '');
-  // Trim and collapse multiple spaces
+  // On Windows, colon is illegal in file names. On POSIX (Linux/macOS) it's allowed.
+  const illegal = process.platform === 'win32' ? /[<>:\"/\\|?*\u0000-\u001F]/g : /[<>\"/\\|?*\u0000-\u001F]/g;
+  const cleaned = str.replace(illegal, '');
   return cleaned.replace(/\s+/g, ' ').trim().replace(/^[. ]+|[. ]+$/g, '');
 }
 function pad2(n: number) { return String(n).padStart(2, '0'); }
@@ -153,57 +149,54 @@ export function episodeOutputPath(
     let tail = String(input);
     const tags: string[] = [];
 
-    // Pre-normalize common multi-token patterns so splitting doesn't break them
-    const normMap: Array<[RegExp, string]> = [
-      [/\bh\.?264\b/ig, 'H264'],
-      [/\baac2(?:\.0)?\b/ig, 'AAC20'],
-      [/\baac\b/ig, 'AAC'],
-      [/\bweb[-_. ]?dl\b/ig, 'WEBDL'],
-      [/\bweb[-_. ]?rip\b/ig, 'WEBRIP'],
-      [/\bwebrip\b/ig, 'WEBRIP'],
-      [/\bbluray\b/ig, 'BLURAY'],
-      [/\bbdremux\b/ig, 'BDREMUX'],
-      [/\bbdrip\b/ig, 'BDRIP'],
-      [/\bx26?4\b/ig, 'x264'],
-      [/\b(hd)?tv\b/ig, 'HDTV'],
-      [/\b(dolbyvision|dolby)\b/ig, 'DOLBY'],
-      [/\b1080p60\b/ig, '1080p60'],
+    const push = (t: string) => { if (!t) return; const v = String(t).trim(); if (v) tags.push(v); };
+
+    // Ordered list of patterns: more specific first.
+    const patterns: Array<{ re: RegExp; norm: (m: RegExpMatchArray) => string | string[] }> = [
+      { re: /(ESub|Hardsub|Softsub|Sub|Subbed)[\-_. ]*([A-Za-z0-9][A-Za-z0-9_\-]{1,60})?/ig, norm: (m) => m[2] ? [m[1].toUpperCase() === 'ESUB' ? 'ESub' : m[1], m[2]] : (m[1].toUpperCase() === 'ESUB' ? 'ESub' : m[1]) },
+      { re: /\bH\.?264\b/ig, norm: () => 'H.264' },
+      { re: /\bAAC2(?:\.0)?\b/ig, norm: () => 'AAC2.0' },
+      { re: /\bAAC\b/ig, norm: () => 'AAC' },
+      { re: /\b(2160p|4k|1080p|720p|480p)\b/ig, norm: (m) => m[1].toLowerCase() },
+      { re: /\bWEB[-_. ]?DL\b/ig, norm: () => 'WEB-DL' },
+      { re: /\bWEB[-_. ]?RIP\b/ig, norm: () => 'WEB-RIP' },
+      { re: /\b(BLURAY|BDRIP|BDREMUX|HDTV)\b/ig, norm: (m) => m[1].toUpperCase() },
+      { re: /\b(DTS(?:-HD)?|DDP5\.1|AC3|FLAC)\b/ig, norm: (m) => m[1].toUpperCase() },
+      { re: /\b(UNCENSORED|UNCUT|REPACK|PROPER|LIMITED|UNRATED|EXTENDED|REMASTER)\b/ig, norm: (m) => m[1].toLowerCase() },
+      { re: /\b(ESUB|HARDSUB|SOFTSUB|ASS|SSA|SRT|SUB|SUBBED|SUBS)\b/ig, norm: (m) => m[1].toUpperCase() },
+      { re: /\b(JPN|JAP|JP|ENG|EN|KOR|ZH|CHS|CHT|ITA|FRA|GER)\b/ig, norm: (m) => m[1].toUpperCase() },
+      { re: /\b(1080p60|720p60|60fps|30fps|24fps|HDR10|DOLBYVISION|HDR)\b/ig, norm: (m) => m[1].toUpperCase() },
     ];
-    for (const [r, rep] of normMap) tail = tail.replace(r, rep);
 
-    // Tokenize on separators
-    const tokens = tail.split(/[^A-Za-z0-9]+/).filter(Boolean);
-
-    // Known tokens mapping to canonical tags
-    const canonical: Record<string, string> = {
-      '2160p': '2160p', '4k': '2160p', '1080p': '1080p', '720p': '720p', '480p': '480p',
-      'webdl': 'WEB-DL', 'webrip': 'WEB-RIP', 'web': 'WEB', 'hdtv': 'HDTV', 'bdrip': 'BDRIP', 'bdremux': 'BDREMUX', 'bluray': 'BLURAY',
-      'x264': 'x264', 'x265': 'x265', 'h264': 'H264', 'hevc': 'HEVC', 'avc': 'AVC', 'av1': 'AV1', 'xvid': 'XVID',
-      'aac20': 'AAC2.0', 'aac2': 'AAC2.0', 'aac': 'AAC', 'flac': 'FLAC', 'ac3': 'AC3', 'ddp51': 'DDP5.1', 'dts': 'DTS', 'dtshd': 'DTS-HD',
-      'uncensored': 'uncensored', 'uncut': 'uncut', 'remux': 'remux', 'proper': 'proper', 'repack': 'repack', 'limited': 'limited', 'unrated': 'unrated',
-      'esub': 'ESub', 'hardsub': 'Hardsub', 'softsub': 'Softsub', 'sub': 'Sub', 'subs': 'Subs', 'ass': 'ASS', 'ssa': 'SSA', 'srt': 'SRT',
-      'jpn': 'JPN', 'jap': 'JPN', 'jp': 'JPN', 'eng': 'ENG', 'english': 'ENG', 'kor': 'KOR', 'zh': 'ZHO', 'chs': 'ZHCN', 'cht': 'ZHTW',
-      'hdr': 'HDR', 'hdr10': 'HDR10', 'dolbyvision': 'DOLBY', '10bit': '10bit', '8bit': '8bit',
-      '1080p60': '1080p60', '720p60': '720p60', '60fps': '60fps'
-    };
-
-    // scan tokens from the end, collecting known tokens into tags
-    let i = tokens.length - 1;
-    while (i >= 0) {
-      const t = tokens[i];
-      const lower = String(t).toLowerCase();
-      if (canonical[lower]) { tags.unshift(canonical[lower]); i--; continue; }
-      // group names: CamelCase or mixed-case token likely a group
-      if (i === tokens.length - 1 && /^[A-Za-z][A-Za-z0-9]{2,40}$/.test(t) && /[A-Z]/.test(t)) { tags.unshift(t); i--; continue; }
-      // language codes/short tokens
-      if (/^[A-Za-z]{2,4}$/.test(t) && canonical[lower]) { tags.unshift(canonical[lower]); i--; continue; }
-      // numeric tokens like '264' that are part of H264 were normalized earlier; avoid keeping small numeric tokens alone
-      if (/^\d{1,4}$/.test(t) && tags.length > 0) { tags.unshift(t); i--; continue; }
-      break;
+    for (const p of patterns) {
+      let m: RegExpMatchArray | null;
+      while ((m = p.re.exec(tail)) !== null) {
+        const out = p.norm(m);
+        if (Array.isArray(out)) out.forEach(x => push(String(x)));
+        else push(String(out));
+  const idx = typeof m.index === 'number' ? m.index : 0;
+  tail = tail.slice(0, idx) + tail.slice(idx + m[0].length);
+        p.re.lastIndex = 0; // reset since we mutated tail
+      }
     }
 
-    const title = tokens.slice(0, i + 1).join(' ').replace(/\s+/g, ' ').trim();
-    return { title, tags };
+    // Now capture a trailing group name if present (e.g., ToonsHub)
+    const trailingGroup = tail.match(/(?:[\s._-]+)([A-Za-z][A-Za-z0-9_\-]{2,60})\s*$/);
+    if (trailingGroup) {
+      const g = trailingGroup[1];
+      if (/^[A-Z0-9][A-Za-z0-9_-]*$/.test(g) && (/[A-Z]/.test(g) || g.length <= 6 || /^[A-Z0-9]{2,6}$/.test(g))) {
+        push(g);
+        tail = tail.slice(0, trailingGroup.index);
+      }
+    }
+
+    // Cleanup: remove separators and leftover numeric fragments, collapse spaces
+    let cleaned = tail.replace(/[._\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    cleaned = cleaned.replace(/\b\d{1,4}\b/g, '').replace(/\s+/g, ' ').trim();
+
+    // Deduplicate tags and preserve order
+    const normalizedTags = Array.from(new Set(tags));
+    return { title: cleaned, tags: normalizedTags };
   }
   let year = series.year ? String(series.year) : '';
   let debugSource = 'series.year';
@@ -393,9 +386,6 @@ export async function finalizePlan(p: RenamePlan) {
         if (year && p.meta.type === 'series' && p.meta.metadataTitle) {
           const mt = String(p.meta.metadataTitle);
           const yearStr = String(year);
-          // Only insert the year into the prefix if the prefix doesn't already
-          // contain the year. This avoids double-inserting when the generated
-          // metadataTitle already includes the year earlier in the string.
           const parts = mt.split(' - ');
           const prefix = parts.shift() || '';
           const rest = parts.join(' - ');
@@ -415,7 +405,7 @@ export async function finalizePlan(p: RenamePlan) {
       // when a matching segment is found. This keeps preview `p.to` in sync with
       // `p.meta.metadataTitle` and with what applyPlans will create.
       try {
-        if (p.meta && p.meta.type === 'series' && p.meta.metadataTitle && p.to) {
+  if (p.meta && p.meta.type === 'series' && p.meta.metadataTitle && p.to) {
           const metaTitle = String(p.meta.metadataTitle);
           const metaPrefix = metaTitle.split(' - ')[0] || '';
           const seriesBase = metaPrefix.replace(/\s*\(\s*\d{4}\s*\)\s*$/, '').trim();
@@ -438,7 +428,43 @@ export async function finalizePlan(p: RenamePlan) {
               }
             }
             const newDir = segs.join(path.sep);
-            const newPath = path.join(newDir, metaTitle + ext);
+            let newPath = path.join(newDir, metaTitle + ext);
+
+            // If we have a TVDB id and season/episode info in meta, fetch the episode
+            // title from TVDB and replace the episode title portion in the metadata
+            try {
+              if (p.meta.tvdbId && p.meta.type === 'series') {
+                // meta.metadataTitle pattern: "Series (YYYY) - SxxExx - Title"
+                const mtParts = metaTitle.split(' - ');
+                const seriesPart = mtParts[0] || '';
+                const codePart = mtParts.find(x => /^S\d{2}E\d{2}/i.test(x)) || '';
+                let epNumMatch: RegExpMatchArray | null = null;
+                if (codePart) epNumMatch = codePart.match(/S(\d{2})E(\d{2})/i);
+                if (p.meta.tvdbId && epNumMatch && epNumMatch.length >= 3) {
+                  const season = Number(epNumMatch[1]);
+                  const epn = Number(epNumMatch[2]);
+                  try {
+                    const s = await getSeries(Number(p.meta.tvdbId));
+                    // fetch episode by aired order if available
+                    const ep = await getEpisodeByAiredOrder(Number(p.meta.tvdbId), season, epn);
+                    const tvdbTitle = ep?.name || ep?.episodeName || undefined;
+                    if (tvdbTitle) {
+                      // Rebuild metadataTitle using TVDB-provided episode title
+                      const newMetadataTitle = `${seriesPart} - ${codePart} - ${String(tvdbTitle)}`;
+                      p.meta.metadataTitle = newMetadataTitle;
+                      // update newPath filename to match
+                      const dir = path.dirname(String(newPath));
+                      newPath = path.join(dir, newMetadataTitle + ext);
+                    }
+                  } catch (e) {
+                    // ignore TVDB fetch errors and keep the original metadataTitle
+                  }
+                }
+              }
+            } catch (e) {
+              // swallow
+            }
+
             p.to = newPath;
             if (p.meta) p.meta.output = newPath;
           } catch (e) {

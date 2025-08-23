@@ -38,6 +38,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [showBulkResults, setShowBulkResults] = useState(false);
   const [bulkResults, setBulkResults] = useState<Record<string, any[]>>({});
   const [approved, setApproved] = useState<Record<string, any>>({});
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     const load = async () => {
@@ -77,6 +78,25 @@ export default function Dashboard({ buttons }: DashboardProps) {
         }
       } catch {}
       try {
+        // Try server-backed scan cache first
+        const r = await fetch('/api/scan-cache');
+        if (r.ok) {
+          const js = await r.json();
+          if (js && Object.keys(js || {}).length) {
+            setScanItems(js || {});
+          }
+        }
+      } catch (e) {
+        // fallback to sessionStorage when server call fails
+        try {
+          const rawScan = sessionStorage.getItem('dashboard.scanItems');
+          if (rawScan) {
+            const parsed = JSON.parse(rawScan) as Record<string, any[]>;
+            setScanItems(parsed || {});
+          }
+        } catch {}
+      }
+      try {
         const a = await fetch('/api/approved');
         if (a.ok) {
           const js = await a.json();
@@ -87,6 +107,22 @@ export default function Dashboard({ buttons }: DashboardProps) {
       } catch {}
     })();
   }, []);
+
+  // Persist scanItems to sessionStorage so navigating away (to Settings) doesn't lose results
+  useEffect(() => {
+    let didWriteServer = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scanItems || {}) });
+        if (res.ok) didWriteServer = true;
+      } catch (e) {
+        didWriteServer = false;
+      }
+      try {
+        sessionStorage.setItem('dashboard.scanItems', JSON.stringify(scanItems || {}));
+      } catch (e) { /* ignore */ }
+    })();
+  }, [scanItems]);
 
   // (previewVersion removed) previewPlans changes are applied directly to state
 
@@ -647,6 +683,16 @@ export default function Dashboard({ buttons }: DashboardProps) {
 
   // Render a single library card (extracted to avoid duplicating markup)
   const renderLibraryCard = (lib: Library) => {
+    // Determine items to show for this library; apply search filter when present
+    const allItems = (scanItems[lib.id] || []);
+    const q = (searchQuery || '').trim().toLowerCase();
+    const itemsToShow = q ? allItems.filter((item: any) => {
+      try {
+        const hay = [item.path, item.inferred?.parsedName, item.inferred?.title, item.inferred?.episode_title, (previewPlans[item.id] && previewPlans[item.id][0] && previewPlans[item.id][0].meta && previewPlans[item.id][0].meta.metadataTitle) || ''].join(' ').toLowerCase();
+        return hay.indexOf(q) !== -1;
+      } catch (e) { return false; }
+    }) : allItems;
+
     return (
       <div className="card p-4">
           <div className="flex justify-between items-center" style={{ minHeight: 64 }}>
@@ -671,7 +717,10 @@ export default function Dashboard({ buttons }: DashboardProps) {
         </div>
 
         <div className="mt-3 space-y-2">
-          {(scanItems[lib.id] || []).map(item => (
+          {itemsToShow.length === 0 ? (
+            <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
+          ) : (
+            itemsToShow.map(item => (
             <div key={item.id} style={{ position: 'relative' }}>
               {/* checkbox positioned per-item so it aligns with this specific row */}
               {selectMode && (
@@ -766,7 +815,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
               </div>
               </div>
             </div>
-          ))}
+            ))
+          )}
         </div>
       </div>
     );
@@ -807,7 +857,20 @@ export default function Dashboard({ buttons }: DashboardProps) {
           <button title="Show or hide previously saved bulk scan results" className={buttons.base} onClick={() => setShowBulkResults(s => !s)} disabled={!bulkSaved}>
             {showBulkResults ? 'Hide bulk results' : 'View bulk results'}
           </button>
+          <button title="Clear cached scans" className={buttons.base + ' ml-2'} onClick={async () => {
+            try {
+              await fetch('/api/scan-cache', { method: 'DELETE' });
+            } catch {}
+            try { sessionStorage.removeItem('dashboard.scanItems'); } catch {}
+            setScanItems({});
+          }}>
+            Clear cached scans
+          </button>
         </div>
+      </div>
+
+      <div className="mt-3">
+        <input className="input" placeholder="Search scanned items (filename, title...)" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
       </div>
 
       {loading && <p className="text-muted">Loading libraries…</p>}
