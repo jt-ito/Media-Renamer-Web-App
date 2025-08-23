@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import debug from '../lib/debug';
 
 type Library = {
@@ -39,6 +39,93 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [bulkResults, setBulkResults] = useState<Record<string, any[]>>({});
   const [approved, setApproved] = useState<Record<string, any>>({});
   const [searchQuery, setSearchQuery] = useState('');
+
+  // --- Background scanning queue (visible-first, rate-limited) ---
+  type ScanQueueItem = { libId: string; itemId: string };
+  const scanQueueRef = useRef<ScanQueueItem[]>([]);
+  const scanQueuedSetRef = useRef(new Set<string>());
+  const isProcessingRef = useRef(false);
+  const scanItemsRef = useRef(scanItems);
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const shownLibrariesRef = useRef<typeof shownLibraries | null>(null);
+  // delay between queued fetches to keep within API limits (ms)
+  const RATE_DELAY_MS = 1500; // ~40 requests/min
+
+  useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
+
+  const enqueueScan = useCallback((libId: string, itemId: string, front = false) => {
+    const key = `${libId}::${itemId}`;
+    if (scanQueuedSetRef.current.has(key)) return;
+    scanQueuedSetRef.current.add(key);
+    const entry = { libId, itemId } as ScanQueueItem;
+    if (front) scanQueueRef.current.unshift(entry);
+    else scanQueueRef.current.push(entry);
+    // kick processing
+    void (async function processQueue() {
+      if (isProcessingRef.current) return;
+      isProcessingRef.current = true;
+      try {
+        while (scanQueueRef.current.length) {
+          const next = scanQueueRef.current.shift()!;
+          const keyLocal = `${next.libId}::${next.itemId}`;
+          // locate lib and item from latest state
+      const libs = scanItemsRef.current || {};
+      const items = libs[next.libId] || [];
+          const item = items.find((it: any) => String(it.id) === String(next.itemId));
+          if (item) {
+            try {
+              // find lib object from shownLibraries (best-effort)
+        const libObj = (shownLibrariesRef.current || []).find((l:any) => l.id === next.libId) as any;
+              if (libObj) {
+                await fetchEpisodeTitleIfNeeded(libObj, item);
+              } else {
+                // fallback: construct minimal lib object
+                await fetchEpisodeTitleIfNeeded({ id: next.libId } as any, item);
+              }
+            } catch (e) {
+              // ignore per-item errors
+            }
+          }
+          // drop from queued set and pause
+          scanQueuedSetRef.current.delete(keyLocal);
+          await new Promise(r => setTimeout(r, RATE_DELAY_MS));
+        }
+      } finally {
+        isProcessingRef.current = false;
+      }
+    })();
+  }, [fetchEpisodeTitleIfNeeded]);
+
+  // Observe visible items and enqueue them at front of queue when they appear
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('IntersectionObserver' in window)) return;
+    if (observerRef.current) observerRef.current.disconnect();
+    observerRef.current = new IntersectionObserver(entries => {
+      for (const e of entries) {
+        try {
+          if (e.isIntersecting) {
+            const el = e.target as HTMLElement;
+            const itemId = el.getAttribute('data-item-id');
+            const libId = el.getAttribute('data-lib-id');
+            if (itemId && libId) enqueueScan(libId, itemId, true);
+          }
+        } catch (err) {}
+      }
+    }, { root: null, rootMargin: '400px', threshold: 0.01 });
+
+    // Observe current items in DOM
+    try {
+      const els = document.querySelectorAll('[data-item-id]');
+      els.forEach(el => observerRef.current?.observe(el));
+    } catch (e) {}
+
+    // Re-observe on DOM mutations (new items inserted)
+    const mo = new MutationObserver(() => {
+      try { const els = document.querySelectorAll('[data-item-id]'); els.forEach(el => observerRef.current?.observe(el)); } catch {}
+    });
+    try { mo.observe(document.body, { childList: true, subtree: true }); } catch {}
+    return () => { try { observerRef.current?.disconnect(); } catch {} try { mo.disconnect(); } catch {} };
+  }, [enqueueScan]);
 
   useEffect(() => {
     const load = async () => {
@@ -227,6 +314,9 @@ export default function Dashboard({ buttons }: DashboardProps) {
     }
     return Array.from(m.values());
   }, [libraries]);
+
+  // Sync ref for shownLibraries used by the background scanner
+  useEffect(() => { try { shownLibrariesRef.current = shownLibraries as any; } catch {} }, [shownLibraries]);
 
   async function scanLibrary(lib: Library) {
     setScanningLib(lib.id);
@@ -721,7 +811,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
             itemsToShow.map(item => (
-            <div key={item.id} style={{ position: 'relative' }}>
+            <div key={item.id} data-item-id={item.id} data-lib-id={lib.id} style={{ position: 'relative' }}>
               {/* checkbox positioned per-item so it aligns with this specific row */}
               {selectMode && (
                 <div style={{ position: 'absolute', left: -56, top: '50%', transform: 'translateY(-50%)', width: 56, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
