@@ -659,6 +659,14 @@ export default function Dashboard({ buttons }: DashboardProps) {
             {previewSkippedMap[lib.id] && (
               <button className={buttons.base} onClick={() => previewAllThrottled(lib)} disabled={!!previewingMap[lib.id]}>Preview all (throttled)</button>
             )}
+            <button className={buttons.base + ' ml-2'} onClick={async () => {
+              try {
+                const res = await fetch(`/api/libraries/${encodeURIComponent(lib.id)}`, { method: 'DELETE' });
+                if (!res.ok) throw new Error(`Delete failed (${res.status})`);
+                const js = await res.json();
+                setLibraries(Array.isArray(js.libraries) ? js.libraries : (await (await fetch('/api/libraries')).json()));
+              } catch (e: any) { setError(e?.message ?? 'Delete failed'); }
+            }} title="Remove library">🗑️ Remove</button>
           </div>
         </div>
 

@@ -249,7 +249,9 @@ export function Settings() {
 
   // Simple client-side validation for paths (best-effort)
   function validatePath(p: string) {
-    if (!p || !p.trim()) return 'Path cannot be empty';
+  // Allow empty paths (the settings form may intentionally leave paths blank).
+  // Only validate when a non-empty path is provided.
+  if (!p || !p.trim()) return null;
   // Allow both POSIX and Windows-style paths. Reject characters that are never valid in file paths,
   // but allow a single ':' when used as a Windows drive letter (e.g. C:\\path) and allow UNC prefixes \\server\share
   const trimmed = p.trim();
