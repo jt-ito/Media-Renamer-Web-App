@@ -1543,16 +1543,16 @@ export default function ScanManager({ buttons }: DashboardProps) {
               const vstate = virtualListStateRef.current[vsKey];
               const getSize = (index: number) => vstate.sizeMap[index] || 120;
               const setSize = (index: number, size: number) => {
-                // Normalize size to avoid sub-pixel jitter and only reset when
-                // the change is meaningful (>2px). This prevents react-window
-                // from re-rendering the list continuously which causes hover
-                // flicker and lost clicks.
-                const normalized = Math.round(size || 0);
-                const prev = vstate.sizeMap[index] || 0;
-                if (Math.abs(prev - normalized) > 2) {
+                try {
+                  // Normalize size to integer and ignore tiny fluctuations
+                  const normalized = Math.ceil(size || 0);
+                  const prev = vstate.sizeMap[index] || 0;
+                  if (Math.abs(prev - normalized) <= 2) return;
                   vstate.sizeMap[index] = normalized;
-                  try { vstate.listRef.current?.resetAfterIndex(index); } catch (e) {}
-                }
+                  // Use the `forceUpdate` flag as false to let react-window batch
+                  // internal changes and avoid triggering an immediate heavy reflow.
+                  try { vstate.listRef.current?.resetAfterIndex(index, false); } catch (e) {}
+                } catch (e) { /* ignore measurement errors */ }
               };
 
               const itemCount = itemsToShow.length;
@@ -1561,15 +1561,34 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 const mapKey = `${lib.id}::${item.id}`;
                 const hydrated = !!hydratedMap[mapKey];
                 // ref callback to measure element height without hooks (react-window render-prop)
+                // Debounce ResizeObserver notifications to avoid frequent calls which
+                // cause react-window to reset rows and produce hover/click jitter.
                 const refCallback = (el: HTMLDivElement | null) => {
                   try {
+                    // Clear previous observer and timer if present
+                    try {
+                      const prev = (el as any)?.__mr_ro;
+                      if (prev) try { prev.disconnect(); } catch {}
+                    } catch {}
+
                     if (el === null) return;
-                    try { const prev = (el as any).__mr_ro; if (prev) try { prev.disconnect(); } catch {} } catch {}
-                    const measure = () => setSize(index, Math.ceil(el.getBoundingClientRect().height));
+
+                    const measure = () => {
+                      try { setSize(index, Math.ceil(el.getBoundingClientRect().height)); } catch (e) {}
+                    };
+
+                    // Initial immediate measurement
                     measure();
+
                     try {
                       if ((window as any).ResizeObserver) {
-                        const ro = new (window as any).ResizeObserver(() => measure());
+                        const ro = new (window as any).ResizeObserver(() => {
+                          try {
+                            // debounce per-element using a timer stored on the DOM node
+                            try { clearTimeout((el as any).__mr_to); } catch {}
+                            (el as any).__mr_to = setTimeout(() => measure(), 140);
+                          } catch (e) { /* ignore RO callback errors */ }
+                        });
                         (el as any).__mr_ro = ro;
                         ro.observe(el);
                       }

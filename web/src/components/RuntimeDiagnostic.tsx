@@ -11,13 +11,41 @@ export default function RuntimeDiagnostic() {
       const interesting = ['--bg', '--text', '--surface', '--border', '--muted'];
       const found: Record<string, string> = {};
       interesting.forEach((k) => (found[k] = style.getPropertyValue(k).trim()));
-      // Also capture root children count and top-level elements that could overlay
       const rootChildren = Array.from(document.body.children).map((c) => ({ tag: c.tagName, id: c.id || null, class: c.className || null }));
-      // console output for easier remote inspection
-      // eslint-disable-next-line no-console
-      console.info('[RuntimeDiagnostic] themeClass=', root.className, 'vars=', found, 'bodyChildren=', rootChildren);
+
+      // Find potential overlay elements (fixed/absolute positioned near top-right)
+      const overlays = Array.from(document.body.querySelectorAll('*')).filter(el => {
+        try {
+          const st = getComputedStyle(el);
+          return (st.position === 'fixed' || st.position === 'absolute') && (st.pointerEvents !== 'none' || st.zIndex);
+        } catch (e) { return false; }
+      }).slice(0, 30).map((el: Element) => ({ tag: el.tagName, id: el.id || null, class: el.className || null, pointerEvents: (getComputedStyle(el).pointerEvents), zIndex: (getComputedStyle(el).zIndex) }));
+
+      // log a friendly summary to the console for remote inspection
+      /* eslint-disable no-console */
+      console.groupCollapsed('[RuntimeDiagnostic] Page diagnostic');
+      console.log('themeClass=', root.className);
+      console.log('css vars=', found);
+      console.log('top-level body children:', rootChildren);
+      console.log('overlay candidates (first 30):', overlays);
+      console.log('current body.classList:', Array.from(document.body.classList));
+      console.groupEnd();
+      /* eslint-enable no-console */
+
       setVars(found);
       setThemeClass(root.className);
+
+      // Watch for classList mutations on body so changes like `logs-open` are visible in console
+      const mo = new MutationObserver(muts => {
+        muts.forEach(m => {
+          if (m.type === 'attributes' && (m as any).attributeName === 'class') {
+            // eslint-disable-next-line no-console
+            console.info('[RuntimeDiagnostic] body.class changed ->', document.body.className);
+          }
+        });
+      });
+      mo.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      return () => mo.disconnect();
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('RuntimeDiagnostic failed', e);
