@@ -52,7 +52,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const isProcessingRef = useRef(false);
   const scanItemsRef = useRef(scanItems);
   // per-library metadata for large libs and background scanning state
-  const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean }>>({});
+  const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean; hideWhileScanning?: boolean }>>({});
   const observerRef = useRef<IntersectionObserver | null>(null);
   const shownLibrariesRef = useRef<typeof shownLibraries | null>(null as any);
   // Web Worker for heavy scanning tasks
@@ -796,8 +796,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
   async function scanLibrary(lib: Library) {
   setScanningLib(lib.id);
   setScanningMap(m => ({ ...m, [lib.id]: true }));
-    // hide items until scan completes
-    setScanItems(s => ({ ...s, [lib.id]: [] }));
+  // hide items until scan completes
+  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: true };
+  setScanItems(s => ({ ...s, [lib.id]: [] }));
     setScanOffset(0);
     setScanLoading(true);
     try {
@@ -876,6 +877,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
   // update ref and sessionStorage immediately so navigating away and back restores items
   try { persistScanItemsNow(lib.id, accumulatedItems); } catch (e) {}
   setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
+  // reveal items now that scan finished
+  try { delete libraryMetaRef.current[lib.id].hideWhileScanning; } catch (e) {}
   try { persistScanState(lib.id); } catch (e) {}
       if (totalReported > LARGE_LIBRARY_THRESHOLD) {
         libraryMetaRef.current[lib.id] = { large: true, total: totalReported, nextOffset: data.nextOffset ?? items.length };
@@ -1476,7 +1479,11 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 const etaSec = rate > 0 ? Math.round(remaining / rate) : null;
                 return (
                   <div className="inline-block ml-4 p-2 bg-card/80 rounded shadow-sm text-sm">
-                    <div>Scanning: {done}/{total}</div>
+                    <div className="flex items-center gap-2"> 
+                      <div className="font-medium">Scanning</div>
+                      <span className="loader-dots"><span className="dot"/><span className="dot"/><span className="dot"/></span>
+                    </div>
+                    <div className="mt-1">{done}/{total}</div>
                     <div className="text-xs text-muted">{etaSec !== null ? `ETA ${Math.round(etaSec)}s` : 'Estimating…'}</div>
                     <div className="mt-2">
                       <button className={buttons.base + ' mr-2'} onClick={() => {
@@ -1507,11 +1514,13 @@ export default function ScanManager({ buttons }: DashboardProps) {
         </div>
 
         <div className="mt-3 space-y-2">
-          {itemsToShow.length === 0 ? (
+          {libraryMetaRef.current[lib.id]?.hideWhileScanning ? (
+            <div className="text-sm text-muted">Scanning library… results will appear when complete.</div>
+          ) : itemsToShow.length === 0 ? (
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
             (() => {
-              const rowHeight = 120; // rough per-item height including margins (increased to avoid clipped buttons)
+              const rowHeight = 160; // rough per-item height including margins (increased to avoid clipped buttons/inputs)
               const itemCount = itemsToShow.length;
               const Row = ({ index, style }: { index: number; style: any }) => {
                 const item = itemsToShow[index];
@@ -1520,11 +1529,11 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 return (
                   <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
                     {!hydrated ? (
-                      <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 56, marginBottom: 8 }}>
+                      <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 96, marginBottom: 8 }}>
                         <div className="font-mono text-sm break-all">{item.path}</div>
                       </div>
                     ) : (
-                      <div className="card p-3 border rounded-2xl shadow-sm bg-card/60 flex items-center justify-between gap-3" style={{ minHeight: 56, marginBottom: 8 }}>
+                      <div className="card p-3 border rounded-2xl shadow-sm bg-card/60 flex items-center justify-between gap-3" style={{ minHeight: 96, marginBottom: 8 }}>
                         <div className="flex items-start gap-3 flex-1">
                           <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
                           <div className="flex-1">
@@ -1558,7 +1567,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 );
               };
               return (
-                <List height={Math.min(800, itemCount * rowHeight)} itemCount={itemCount} itemSize={rowHeight} width={'100%'}>
+                <List height={Math.min(1200, itemCount * rowHeight)} itemCount={itemCount} itemSize={rowHeight} width={'100%'}>
                   {Row}
                 </List>
               );
@@ -1586,20 +1595,21 @@ export default function ScanManager({ buttons }: DashboardProps) {
             if (libraries.length === 0) { setError('No libraries configured. Add one in Settings.'); return; }
             setError(null); setScanningAll(true);
             try {
+              // Use the same streaming/hidden-until-complete scan flow for each library
               for (const lib of libraries) {
-                setScanningMap(m => ({ ...m, [lib.id]: true }));
-                const res = await fetch('/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ libraryId: lib.id }) });
-                if (!res.ok) throw new Error(`Scan failed for ${lib.name} (${res.status})`);
-                const js = await res.json();
-                setScanItems(s => ({ ...s, [lib.id]: js.items || [] }));
-                setOpenLibPanels(p => ({ ...p, [lib.id]: true }));
-                setScanningMap(m => ({ ...m, [lib.id]: false }));
+                try {
+                  await scanLibrary(lib);
+                } catch (e: any) {
+                  // Continue to next library but record summary
+                  debug('scan all: library scan failed', lib.id, e);
+                  setScanSummary((e?.message) ?? `Scan failed for ${lib.name}`);
+                }
               }
             } catch (e: any) {
               setScanSummary((e?.message) ?? 'Scan failed');
             } finally { setScanningAll(false); setTimeout(() => setScanSummary(null), 4000); }
           }} disabled={scanningAll || loading || libraries.length === 0}>
-            {scanningAll ? 'Scanning…' : 'Scan all libraries'}
+            {scanningAll ? (<span className="loader-dots"><span className="dot"/><span className="dot"/><span className="dot"/></span>) : 'Scan all libraries'}
           </button>
           <button title="Show or hide previously saved bulk scan results" className={buttons.base} onClick={() => setShowBulkResults(s => !s)} disabled={!bulkSaved}>
             {showBulkResults ? 'Hide bulk results' : 'View bulk results'}
