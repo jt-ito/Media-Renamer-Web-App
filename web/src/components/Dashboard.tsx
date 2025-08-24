@@ -94,7 +94,18 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const items = libs[libId] || [];
   const it = items.find((x: any) => String(x.id) === String(itemId));
   const maybePath = it?.path ? normalizePath(it.path) : null;
-  if (maybePath && scannedPathsRef.current.has(maybePath)) return;
+  // Check multiple sources so we don't rescan things that were saved earlier
+  if (maybePath) {
+    if (scannedPathsRef.current.has(maybePath)) return;
+    if (scannedUpdatesRef.current && scannedUpdatesRef.current.has(maybePath)) return;
+    try {
+      const raw = sessionStorage.getItem('dashboard.scannedPaths');
+      if (raw) {
+        const arr = JSON.parse(raw) as string[];
+        if (Array.isArray(arr) && arr.map(normalizePath).includes(maybePath)) return;
+      }
+    } catch {}
+  }
   if (scanQueuedSetRef.current.has(key)) return;
   scanQueuedSetRef.current.add(key);
   const entry = { libId, itemId, silent } as ScanQueueItem;
@@ -550,7 +561,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
                           try {
                             if (!it || !it.path) continue;
                             const p = normalizePath(it.path);
-                            if (scannedPathsRef.current.has(p)) continue;
+                            if (scannedPathsRef.current.has(p) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(p))) continue;
                             enqueueScan(libId, it.id, false, true);
                           } catch (e) {}
                         }
@@ -574,7 +585,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
                   const path = it?.path ? normalizePath(it.path) : null;
                   const key = `${libId}::${it.id}`;
                   if (!path) continue;
-                  if (scannedPathsRef.current.has(path)) continue;
+                  if (scannedPathsRef.current.has(path) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(path))) continue;
                   // Enqueue without front prioritization; idle worker should be quiet (silent)
                   enqueueScan(libId, it.id, false, true);
                   // yield a tick to avoid hogging CPU/network; no global rate limit per request
@@ -626,7 +637,12 @@ export default function Dashboard({ buttons }: DashboardProps) {
           const start = Date.now();
           for (let i = 0; i < Math.min(PREFETCH_COUNT, items.length); i++) {
             if (Date.now() - start > PREFETCH_TIMEOUT_MS) break;
-            try { await fetchEpisodeTitleIfNeeded(lib, items[i]); } catch (e) { /* continue */ }
+            try {
+              const it = items[i];
+              const p = it?.path ? normalizePath(it.path) : null;
+              if (p && (scannedPathsRef.current.has(p) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(p)))) continue;
+              await fetchEpisodeTitleIfNeeded(lib, items[i]);
+            } catch (e) { /* continue */ }
           }
         } finally {
           setInitialPrefetchingMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
