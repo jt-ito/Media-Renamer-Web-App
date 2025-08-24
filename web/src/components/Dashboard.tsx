@@ -94,6 +94,95 @@ export default function Dashboard({ buttons }: DashboardProps) {
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
   useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
 
+  // Restore persisted scan state when Dashboard mounts so results survive navigation
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('dashboard.scanItems');
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, any[]>;
+        if (parsed && typeof parsed === 'object') setScanItems(parsed);
+      }
+    } catch (e) {}
+    try {
+      const raw2 = sessionStorage.getItem('dashboard.scannedUpdates');
+      if (raw2) {
+        const parsed2 = JSON.parse(raw2) as Record<string, any>;
+        if (parsed2 && typeof parsed2 === 'object') scannedUpdatesRef.current = new Map(Object.entries(parsed2));
+      }
+    } catch (e) {}
+    try {
+      const raw3 = sessionStorage.getItem('dashboard.scannedPaths');
+      if (raw3) {
+        const parsed3 = JSON.parse(raw3) as string[];
+        if (Array.isArray(parsed3)) scannedPathsRef.current = new Set(parsed3.map(normalizePath));
+      }
+    } catch (e) {}
+    try {
+      const raw4 = sessionStorage.getItem('dashboard.libraryMeta');
+      if (raw4) {
+        const parsed4 = JSON.parse(raw4) as Record<string, any>;
+        if (parsed4 && typeof parsed4 === 'object') libraryMetaRef.current = parsed4;
+      }
+    } catch (e) {}
+  }, []);
+
+  // Persist helpers: throttle writes to sessionStorage to avoid thrash
+  const persistScanState = useCallback((libId?: string) => {
+    try {
+      // persist visible scanItems for the current libraries
+      try { sessionStorage.setItem('dashboard.scanItems', JSON.stringify(scanItemsRef.current || {})); } catch {}
+      // persist scannedUpdates map
+      try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
+      try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current || []))); } catch {}
+      try { sessionStorage.setItem('dashboard.libraryMeta', JSON.stringify(libraryMetaRef.current || {})); } catch {}
+    } catch (e) {}
+  }, []);
+
+  // expose a simple background scan manager on window so scans survive Dashboard unmounts
+  useEffect(() => {
+    try {
+      const win = window as any;
+      if (!win.__mediaRenamerBackgroundScan) {
+        win.__mediaRenamerBackgroundScan = {
+          enqueue: (libId: string, itemId: string, silent?: boolean) => {
+            // push into local refs so processing loop will pick it up
+            scanQueueRef.current.push({ libId, itemId, silent });
+            scanQueuedSetRef.current.add(`${libId}::${itemId}`);
+            // ensure processing loop runs
+            if (!isProcessingRef.current) {
+              // kick off processing
+              (async () => {
+                isProcessingRef.current = true;
+                try {
+                  while (scanQueueRef.current.length) {
+                    const next = scanQueueRef.current.shift()!;
+                    const keyLocal = `${next.libId}::${next.itemId}`;
+                    const libs = scanItemsRef.current || {};
+                    const items = libs[next.libId] || [];
+                    const item = items.find((it: any) => String(it.id) === String(next.itemId));
+                    if (item) {
+                      try {
+                        const libObj = (shownLibrariesRef.current || []).find((l:any) => l.id === next.libId) as any;
+                        if (libObj) await fetchEpisodeTitleIfNeeded(libObj, item, { silent: !!next.silent });
+                        else await fetchEpisodeTitleIfNeeded({ id: next.libId } as any, item, { silent: !!next.silent });
+                      } catch (e) {}
+                    }
+                    scanQueuedSetRef.current.delete(keyLocal);
+                    await new Promise(r => setTimeout(r, RATE_DELAY_MS));
+                    // persist periodically
+                    persistScanState();
+                  }
+                } finally { isProcessingRef.current = false; }
+              })();
+            }
+          },
+          persist: persistScanState
+        };
+      }
+      return () => { /* leave manager on window so it survives unmount */ };
+    } catch (e) { return; }
+  }, [persistScanState]);
+
   // Initialize worker
   useEffect(() => {
     try {
@@ -680,7 +769,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
         let idx = 0;
         const pool: Promise<void>[] = [];
         const startTime = Date.now();
-        const spawn = () => {
+    const spawn = () => {
           while (pool.length < CONCURRENCY && idx < pageItems.length) {
             const it = pageItems[idx++];
             // check for cancellation between tasks
@@ -696,6 +785,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
                   return { ...p, [lib.id]: { ...prev, done: prev.done + 1 } };
                 } catch (e) { return p; }
               });
+      // persist progress occasionally
+      try { persistScanState(lib.id); } catch (e) {}
             })();
             // remove from pool when done
             pool.push(p.then(() => { const i = pool.indexOf(p); if (i >= 0) pool.splice(i, 1); }));
@@ -725,14 +816,16 @@ export default function Dashboard({ buttons }: DashboardProps) {
       }
       // scanning finished: reveal items (accumulated) and persist
       setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
+  try { persistScanState(lib.id); } catch (e) {}
       if (totalReported > LARGE_LIBRARY_THRESHOLD) {
         libraryMetaRef.current[lib.id] = { large: true, total: totalReported, nextOffset: data.nextOffset ?? items.length };
         // keep metadata; items already set after full scan
       } else {
         libraryMetaRef.current[lib.id] = { large: false, total: totalReported, nextOffset: data.nextOffset ?? items.length };
       }
-      // clear progress
-      setScanProgress(p => { const c = { ...p }; delete c[lib.id]; return c; });
+  // clear progress
+  setScanProgress(p => { const c = { ...p }; delete c[lib.id]; return c; });
+  try { persistScanState(lib.id); } catch (e) {}
       // If the library is large, skip eager auto-preview to avoid hammering the client/network.
       const AUTO_PREVIEW_LIMIT = 30;
       try {
@@ -1321,6 +1414,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
                         setScanProgress(s => { const c = { ...s }; delete c[lib.id]; return c; });
                         libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), bgRunning: false };
                         setScanningMap(m => ({ ...m, [lib.id]: false }));
+                        try { persistScanState(lib.id); } catch (e) {}
                       }}>Cancel</button>
                     </div>
                   </div>
