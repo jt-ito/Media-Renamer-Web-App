@@ -82,7 +82,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   // virtualization threshold: switch to react-window when list length exceeds this
   const LIST_VIRTUALIZE_THRESHOLD = 80;
   // initial prefetch tuning (bigger prefetch and slightly longer timeout)
-  const PREFETCH_COUNT = 12;
+  const PREFETCH_COUNT = 6;
   const PREFETCH_TIMEOUT_MS = 8000;
   // treat very large libraries specially to avoid loading many items into memory/DOM
   const LARGE_LIBRARY_THRESHOLD = 2000; // library size above which we consider it "large"
@@ -666,7 +666,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
           setInitialPrefetchingMap(m => ({ ...m, [lib.id]: true }));
           const start = Date.now();
           // Concurrent prefetch with small concurrency to hide latency without blocking UI
-          const CONCURRENCY = 2;
+          const CONCURRENCY = 5;
           const toPrefetch = Math.min(PREFETCH_COUNT, items.length);
           let idx = 0;
           const workerFn = async () => {
