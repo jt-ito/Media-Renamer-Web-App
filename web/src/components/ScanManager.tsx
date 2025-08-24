@@ -764,7 +764,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
                                           const meta = libraryMetaRef.current[libId] || {} as any;
                                           // If a global "scan all" is running, or hideWhileScanning/bgRunning
                                           // are set for this library, avoid revealing partial results yet.
-                                          if (scanningAll || meta.hideWhileScanning || meta.bgRunning) {
+                                          const prog = scanProgress[libId];
+                                          const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
+                                          if (scanningAll || meta.hideWhileScanning || meta.bgRunning || progIncomplete) {
                                             return s;
                                           }
                                           const window = cur.concat(items).slice(0, INITIAL_WINDOW);
@@ -987,8 +989,10 @@ export default function ScanManager({ buttons }: DashboardProps) {
         const cur = s[lib.id] || [];
         const meta = libraryMetaRef.current[lib.id] || {} as any;
   // If full-scan hide flag is set, a background scan is still running,
-  // or the library hasn't been fully scanned, avoid revealing partial items until the scan completes
-  if (meta.hideWhileScanning || meta.bgRunning || !meta.scannedComplete) return s;
+  // or the library scan progress shows it's incomplete, avoid revealing partial items until the scan completes
+  const prog = scanProgress[lib.id];
+  const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
+  if (meta.hideWhileScanning || meta.bgRunning || progIncomplete || !meta.scannedComplete) return s;
         const merged = [...cur, ...(data.items || [])];
         if (meta.large) return { ...s, [lib.id]: merged.slice(0, INITIAL_WINDOW) };
         return { ...s, [lib.id]: merged };
@@ -1548,116 +1552,115 @@ export default function ScanManager({ buttons }: DashboardProps) {
         </div>
 
         <div className="mt-3 space-y-2">
-          {scanningAll ? (
-            <div className="text-sm text-muted">Scanning all libraries… results will appear when complete.</div>
-          ) : (libraryMetaRef.current[lib.id]?.hideWhileScanning || !libraryMetaRef.current[lib.id]?.scannedComplete) ? (
-            <div className="text-sm text-muted">Waiting for full library scan to complete… results will appear when complete.</div>
-          ) : itemsToShow.length === 0 ? (
-            <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
-          ) : (
-            (() => {
-              // Use a top-level per-library virtualization state to avoid hooks inside render
-              const vsKey = String(lib.id);
-              if (!virtualListStateRef.current[vsKey]) {
-                virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
-              }
-              const vstate = virtualListStateRef.current[vsKey];
-              const getSize = (index: number) => vstate.sizeMap[index] || 120;
-              const setSize = (index: number, size: number) => {
+          {(() => {
+            const meta = libraryMetaRef.current[lib.id] || {} as any;
+            const prog = scanProgress[lib.id];
+            const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
+            const shouldHide = scanningAll || meta.hideWhileScanning || meta.bgRunning || progIncomplete || !meta.scannedComplete;
+            if (shouldHide) return <div className="text-sm text-muted">Waiting for full library scan to complete… results will appear when complete.</div>;
+            if (itemsToShow.length === 0) return <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>;
+
+            // Use a top-level per-library virtualization state to avoid hooks inside render
+            const vsKey = String(lib.id);
+            if (!virtualListStateRef.current[vsKey]) {
+              virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
+            }
+            const vstate = virtualListStateRef.current[vsKey];
+            const getSize = (index: number) => vstate.sizeMap[index] || 120;
+            const setSize = (index: number, size: number) => {
+              try {
+                // Normalize size to integer and ignore tiny fluctuations
+                const normalized = Math.ceil(size || 0);
+                const prev = vstate.sizeMap[index] || 0;
+                if (Math.abs(prev - normalized) <= 2) return;
+                vstate.sizeMap[index] = normalized;
+                // Use the `forceUpdate` flag as false to let react-window batch
+                // internal changes and avoid triggering an immediate heavy reflow.
+                try { vstate.listRef.current?.resetAfterIndex(index, false); } catch (e) {}
+              } catch (e) { /* ignore measurement errors */ }
+            };
+
+            const itemCount = itemsToShow.length;
+            const Row = ({ index, style }: { index: number; style: any }) => {
+              const item = itemsToShow[index];
+              const mapKey = `${lib.id}::${item.id}`;
+              const hydrated = !!hydratedMap[mapKey];
+              // ref callback to measure element height without hooks (react-window render-prop)
+              // Debounce ResizeObserver notifications to avoid frequent calls which
+              // cause react-window to reset rows and produce hover/click jitter.
+              const refCallback = (el: HTMLDivElement | null) => {
                 try {
-                  // Normalize size to integer and ignore tiny fluctuations
-                  const normalized = Math.ceil(size || 0);
-                  const prev = vstate.sizeMap[index] || 0;
-                  if (Math.abs(prev - normalized) <= 2) return;
-                  vstate.sizeMap[index] = normalized;
-                  // Use the `forceUpdate` flag as false to let react-window batch
-                  // internal changes and avoid triggering an immediate heavy reflow.
-                  try { vstate.listRef.current?.resetAfterIndex(index, false); } catch (e) {}
-                } catch (e) { /* ignore measurement errors */ }
+                  // Clear previous observer and timer if present
+                  try {
+                    const prev = (el as any)?.__mr_ro;
+                    if (prev) try { prev.disconnect(); } catch {}
+                  } catch {}
+
+                  if (el === null) return;
+
+                  const measure = () => {
+                    try { setSize(index, Math.ceil(el.getBoundingClientRect().height)); } catch (e) {}
+                  };
+
+                  // Initial immediate measurement
+                  measure();
+
+                  try {
+                    if ((window as any).ResizeObserver) {
+                      const ro = new (window as any).ResizeObserver(() => {
+                        try {
+                          // debounce per-element using a timer stored on the DOM node
+                          try { clearTimeout((el as any).__mr_to); } catch {}
+                          (el as any).__mr_to = setTimeout(() => measure(), 140);
+                        } catch (e) { /* ignore RO callback errors */ }
+                      });
+                      (el as any).__mr_ro = ro;
+                      ro.observe(el);
+                    }
+                  } catch (e) { /* ignore RO errors */ }
+                } catch (e) { /* ignore measure errors */ }
               };
 
-              const itemCount = itemsToShow.length;
-              const Row = ({ index, style }: { index: number; style: any }) => {
-                const item = itemsToShow[index];
-                const mapKey = `${lib.id}::${item.id}`;
-                const hydrated = !!hydratedMap[mapKey];
-                // ref callback to measure element height without hooks (react-window render-prop)
-                // Debounce ResizeObserver notifications to avoid frequent calls which
-                // cause react-window to reset rows and produce hover/click jitter.
-                const refCallback = (el: HTMLDivElement | null) => {
-                  try {
-                    // Clear previous observer and timer if present
-                    try {
-                      const prev = (el as any)?.__mr_ro;
-                      if (prev) try { prev.disconnect(); } catch {}
-                    } catch {}
-
-                    if (el === null) return;
-
-                    const measure = () => {
-                      try { setSize(index, Math.ceil(el.getBoundingClientRect().height)); } catch (e) {}
-                    };
-
-                    // Initial immediate measurement
-                    measure();
-
-                    try {
-                      if ((window as any).ResizeObserver) {
-                        const ro = new (window as any).ResizeObserver(() => {
-                          try {
-                            // debounce per-element using a timer stored on the DOM node
-                            try { clearTimeout((el as any).__mr_to); } catch {}
-                            (el as any).__mr_to = setTimeout(() => measure(), 140);
-                          } catch (e) { /* ignore RO callback errors */ }
-                        });
-                        (el as any).__mr_ro = ro;
-                        ro.observe(el);
-                      }
-                    } catch (e) { /* ignore RO errors */ }
-                  } catch (e) { /* ignore measure errors */ }
-                };
-
-                if (libraryMetaRef.current[lib.id] && libraryMetaRef.current[lib.id].hideWhileScanning) {
-                  return (
-                    <div style={style} key={item.id}>
-                      <div ref={refCallback} className="p-2 text-sm text-muted">Scanning… results will appear when the scan completes.</div>
-                    </div>
-                  );
-                }
-
+              if (libraryMetaRef.current[lib.id] && libraryMetaRef.current[lib.id].hideWhileScanning) {
                 return (
-                  <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
-                    <div ref={refCallback} className="scan-item">
-                      {!hydrated ? (
-                        <div className="font-mono break-all">{item.path}</div>
-                      ) : (
-                        <div className="flex items-center gap-3">
-                          <div className="text-xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
-                          <div className="flex-1">
-                            <div className="font-mono break-all">{item.path}</div>
-                            <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button className={buttons.base} onClick={() => rescanItem(lib, item)}>🔄</button>
-                            <button className={buttons.base} onClick={() => autoPreview(lib, item)}>🤖</button>
-                            <button className={buttons.base} onClick={() => searchTVDBFor(item)}>🔍</button>
-                            <input className="input text-sm" style={{ width: 110 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
-                            <button className={buttons.base} onClick={() => approveItem(lib, item)}>✅</button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                  <div style={style} key={item.id}>
+                    <div ref={refCallback} className="p-2 text-sm text-muted">Scanning… results will appear when the scan completes.</div>
                   </div>
                 );
-              };
+              }
 
               return (
-                <List ref={(vstate.listRef as any)} height={Math.min(1200, itemCount * 120)} itemCount={itemCount} itemSize={getSize} width={'100%'}>
-                  {Row}
-                </List>
+                <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
+                  <div ref={refCallback} className="scan-item">
+                    {!hydrated ? (
+                      <div className="font-mono break-all">{item.path}</div>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <div className="text-xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
+                        <div className="flex-1">
+                          <div className="font-mono break-all">{item.path}</div>
+                          <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button className={buttons.base} onClick={() => rescanItem(lib, item)}>🔄</button>
+                          <button className={buttons.base} onClick={() => autoPreview(lib, item)}>🤖</button>
+                          <button className={buttons.base} onClick={() => searchTVDBFor(item)}>🔍</button>
+                          <input className="input text-sm" style={{ width: 110 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
+                          <button className={buttons.base} onClick={() => approveItem(lib, item)}>✅</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
               );
-            })()
-          )}
+            };
+
+            return (
+              <List ref={(vstate.listRef as any)} height={Math.min(1200, itemCount * 120)} itemCount={itemCount} itemSize={getSize} width={'100%'}>
+                {Row}
+              </List>
+            );
+          })()}
         </div>
       </div>
     );
