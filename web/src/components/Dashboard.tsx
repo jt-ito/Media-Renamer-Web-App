@@ -103,13 +103,25 @@ export default function Dashboard({ buttons }: DashboardProps) {
         const msg = ev.data || {};
         const { requestId, type } = msg;
         const pending = pendingWorkerRequests.current.get(requestId as string);
-        if (!pending) return;
-        if (type === 'fetchEpisodeTitleResult') {
-          pending.resolve(msg.updatedItem || null);
-        } else {
-          pending.reject(msg.error || 'worker error');
+        if (pending) {
+          if (type === 'fetchEpisodeTitleResult') {
+            pending.resolve(msg.updatedItem || null);
+          } else {
+            pending.reject(msg.error || 'worker error');
+          }
+          pendingWorkerRequests.current.delete(requestId as string);
         }
-        pendingWorkerRequests.current.delete(requestId as string);
+        // Best-effort: update tvdbInputs when worker returns a tvdb id for an item
+        try {
+          if (type === 'fetchEpisodeTitleResult' && msg.updatedItem && msg.updatedItem.__tvdb) {
+            const up = msg.updatedItem;
+            const key = up.id;
+            const tv = up.__tvdb;
+            if (key && tv && tv.id) {
+              setTvdbInputs(m => ({ ...m, [key]: { id: tv.id, type: tv.type || 'series' } }));
+            }
+          }
+        } catch (e) { /* ignore */ }
       });
       return () => { try { w.terminate(); } catch {} };
     } catch (e) { /* worker failed, will use main-thread fallback */ }
@@ -667,7 +679,9 @@ export default function Dashboard({ buttons }: DashboardProps) {
           const start = Date.now();
           // Concurrent prefetch with small concurrency to hide latency without blocking UI
           const CONCURRENCY = 5;
-          const toPrefetch = Math.min(PREFETCH_COUNT, items.length);
+          // Use the client window of items to avoid iterating a huge server-returned array
+          const clientItems = (scanItemsRef.current || {})[lib.id] || [];
+          const toPrefetch = Math.min(PREFETCH_COUNT, clientItems.length);
           let idx = 0;
           const workerFn = async () => {
             while (true) {
@@ -675,11 +689,11 @@ export default function Dashboard({ buttons }: DashboardProps) {
               if (i >= toPrefetch) return;
               if (Date.now() - start > PREFETCH_TIMEOUT_MS) return;
               try {
-                const it = items[i];
+                const it = clientItems[i];
                 const p = it?.path ? normalizePath(it.path) : null;
                 if (p && (scannedPathsRef.current.has(p) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(p)))) continue;
                 // mark silent to avoid UI indicators and reduce re-renders
-                await fetchEpisodeTitleIfNeeded(lib, items[i], { silent: true });
+                await fetchEpisodeTitleIfNeeded(lib, it, { silent: true });
               } catch (e) { /* continue */ }
             }
           };

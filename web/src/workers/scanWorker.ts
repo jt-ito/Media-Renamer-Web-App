@@ -26,7 +26,9 @@ self.addEventListener('message', async (ev) => {
         const sjs = await sres.json();
         const results = sjs.data || sjs || [];
         if (!Array.isArray(results) || !results.length) { self.postMessage({ requestId, type: 'fetchEpisodeTitleResult', updatedItem: null }); return; }
-        const seriesId = results[0].id;
+  const top = results[0];
+  const seriesId = top.id;
+  const topType = top.type || 'series';
         const season = inf.season ?? 1;
         const eres = await fetch(`/api/episode-title?seriesId=${encodeURIComponent(String(seriesId))}&season=${encodeURIComponent(String(season))}&episode=${encodeURIComponent(String(ep))}`);
         if (!eres.ok) { self.postMessage({ requestId, type: 'fetchEpisodeTitleResult', updatedItem: null }); return; }
@@ -40,8 +42,8 @@ self.addEventListener('message', async (ev) => {
         const base = inf.title || (inf.parsedName ? String(inf.parsedName).split(' - ')[0] : '');
         newInferred.parsedName = `${base} - S${paddedS}E${paddedE} - ${title}`;
         newInferred.jellyfinExample = `${base}/Season ${paddedS}/${base} - S${paddedS}E${paddedE} - ${title}`;
-        const updatedItem = { ...item, inferred: newInferred };
-        self.postMessage({ requestId, type: 'fetchEpisodeTitleResult', updatedItem });
+  const updatedItem = { ...item, inferred: newInferred, __tvdb: { id: seriesId, type: topType } };
+  self.postMessage({ requestId, type: 'fetchEpisodeTitleResult', updatedItem });
         return;
       } catch (e) {
         self.postMessage({ requestId, type: 'fetchEpisodeTitleResult', updatedItem: null, error: String(e) });
