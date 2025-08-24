@@ -90,6 +90,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const INITIAL_WINDOW = 200; // initial number of items to keep in client state for large libs
   const PREFETCH_BATCH_SIZE = 200; // background batch size when scanning large libs
   const IDLE_BATCH_DELAY_MS = 400; // delay between background batches to avoid hogging
+  // per-library virtualization state (size map + list ref) kept in a top-level ref
+  const virtualListStateRef = useRef<Record<string, { sizeMap: Record<number, number>; listRef: { current: any } }>>({});
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
   useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
@@ -1529,14 +1531,17 @@ export default function ScanManager({ buttons }: DashboardProps) {
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
             (() => {
-              // Variable-size virtualization support: measure per-row height
-              const sizeMapRef = useRef<Record<number, number>>({});
-              const listRef = useRef<any>(null as any);
-              const getSize = (index: number) => sizeMapRef.current[index] || 120;
+              // Use a top-level per-library virtualization state to avoid hooks inside render
+              const vsKey = String(lib.id);
+              if (!virtualListStateRef.current[vsKey]) {
+                virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
+              }
+              const vstate = virtualListStateRef.current[vsKey];
+              const getSize = (index: number) => vstate.sizeMap[index] || 120;
               const setSize = (index: number, size: number) => {
-                if (sizeMapRef.current[index] !== size) {
-                  sizeMapRef.current[index] = size;
-                  try { listRef.current?.resetAfterIndex(index); } catch (e) {}
+                if (vstate.sizeMap[index] !== size) {
+                  vstate.sizeMap[index] = size;
+                  try { vstate.listRef.current?.resetAfterIndex(index); } catch (e) {}
                 }
               };
 
@@ -1548,13 +1553,10 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 // ref callback to measure element height without hooks (react-window render-prop)
                 const refCallback = (el: HTMLDivElement | null) => {
                   try {
-                    // disconnect previous observer if present on the element
-                    if (el === null) return; // removed
-                    // If a previous observer exists on this element, disconnect it first
+                    if (el === null) return;
                     try { const prev = (el as any).__mr_ro; if (prev) try { prev.disconnect(); } catch {} } catch {}
                     const measure = () => setSize(index, Math.ceil(el.getBoundingClientRect().height));
                     measure();
-                    // attach a ResizeObserver to update on dynamic changes
                     try {
                       if ((window as any).ResizeObserver) {
                         const ro = new (window as any).ResizeObserver(() => measure());
@@ -1565,7 +1567,6 @@ export default function ScanManager({ buttons }: DashboardProps) {
                   } catch (e) { /* ignore measure errors */ }
                 };
 
-                // If the library is hidden during scan, render a compact placeholder
                 if (libraryMetaRef.current[lib.id] && libraryMetaRef.current[lib.id].hideWhileScanning) {
                   return (
                     <div style={style} key={item.id}>
@@ -1580,7 +1581,6 @@ export default function ScanManager({ buttons }: DashboardProps) {
                       {!hydrated ? (
                         <div className="font-mono text-sm break-all">{item.path}</div>
                       ) : (
-                        // compact inline layout
                         <div className="flex items-center gap-3">
                           <div className="text-xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
                           <div className="flex-1">
@@ -1602,7 +1602,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
               };
 
               return (
-                <List ref={listRef} height={Math.min(1200, itemCount * 120)} itemCount={itemCount} itemSize={getSize} width={'100%'}>
+                <List ref={(vstate.listRef as any)} height={Math.min(1200, itemCount * 120)} itemCount={itemCount} itemSize={getSize} width={'100%'}>
                   {Row}
                 </List>
               );
