@@ -752,8 +752,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
                         setScanItems(s => {
                           const cur = s[libId] || [];
                           const meta = libraryMetaRef.current[libId] || {} as any;
-                          if (meta.hideWhileScanning) {
-                            // keep the current client state (likely empty) until reveal
+                          // If hideWhileScanning or bgRunning (still in progress), keep current state
+                          if (meta.hideWhileScanning || meta.bgRunning) {
                             return s;
                           }
                           const window = cur.concat(items).slice(0, INITIAL_WINDOW);
@@ -968,8 +968,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
       setScanItems(s => {
         const cur = s[lib.id] || [];
         const meta = libraryMetaRef.current[lib.id] || {} as any;
-        // If full-scan hide flag is set, avoid revealing partial items until completed
-        if (meta.hideWhileScanning) return s;
+        // If full-scan hide flag is set or a background scan is still running,
+        // avoid revealing partial items until the scan completes
+        if (meta.hideWhileScanning || meta.bgRunning) return s;
         const merged = [...cur, ...(data.items || [])];
         if (meta.large) return { ...s, [lib.id]: merged.slice(0, INITIAL_WINDOW) };
         return { ...s, [lib.id]: merged };
