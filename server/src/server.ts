@@ -13,6 +13,8 @@ import { loadLibraries, saveLibraries } from './config.js';
 import { getLogs, log } from './logging.js';
 import { inferFromPath } from './parse.js';
 import { searchTVDB, getEpisodeByAiredOrder, mapAbsoluteToAired, invalidateTVDBToken, getSeries } from './tvdb.js';
+import { pickTvdbCandidate as pickTvdbCandidateHelper } from './tvdbHelpers.js';
+import { normalizePlansForPreview as normalizePlansForPreviewHelper, ensurePlanYears as ensurePlanYearsHelper, escapeRegex as escapeRegexHelper, normalizePathForCache } from './scan.js';
 import { Library, MediaType, RenamePlan, ScanItem } from './types.js';
 import { planEpisode, planMovie, applyPlans } from './renamer.js';
 import { initApproved, isApproved, markApproved, approvedList, unapproveLast } from './approved.js';
@@ -174,9 +176,7 @@ async function bootstrap() {
   // When a file is approved, also try to find sibling files in the same
   // directory that look like the same series/season/episode but differ only
   // by an appended episode title (for example: "Citrus - S01E01" vs "Citrus - S01E01 - love affair!?")
-  function escapeRegex(s: string) {
-    return String(s).replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
-  }
+  const escapeRegex = escapeRegexHelper;
   function markSiblingApprovals(original: string, size: number, tvdbId: number, type: 'movie'|'series') {
     try {
       const dir = path.dirname(original);
@@ -218,70 +218,14 @@ async function bootstrap() {
   // match the parsed/local title or share the same year or have reasonable
   // token overlap. This avoids adopting unrelated results whose names are
   // superficially similar (e.g. generic titles returned by search).
-  function pickTvdbCandidate(parsedName: string | undefined, inferredYear: number | undefined, results: any[]): any | null {
-    if (!Array.isArray(results) || results.length === 0) return null;
-    const clean = (s: any) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-    const pn = clean(parsedName || '');
-  // try to find a candidate that contains or is contained by the parsed name and prefers the inferred year
-    for (const r of results) {
-      try {
-        const cn = clean(r.name || r.title || '');
-        if (!cn) continue;
-        if (pn && (cn.includes(pn) || pn.includes(cn))) return r;
-        if (inferredYear && r.year && Number(r.year) === Number(inferredYear)) return r;
-        const pTokens = pn ? pn.split(' ') : [];
-        const cTokens = cn.split(' ');
-        const common = pTokens.filter(t => t && cTokens.includes(t));
-        // if a moderate fraction of tokens overlap, accept
-        if (pTokens.length && common.length >= Math.min(3, Math.max(1, Math.floor(pTokens.length / 2)))) return r;
-      } catch (e) { /* ignore per-candidate errors */ }
-    }
-    return null;
-  }
+  const pickTvdbCandidate = pickTvdbCandidateHelper;
 
   // Normalize plans for preview responses: call the canonical finalizer
   // used during apply so preview paths exactly match the real output.
-  async function normalizePlansForPreview(plans: any[]) {
-    try {
-      const { finalizePlan } = await import('./renamer.js');
-      for (const p of plans) {
-        try {
-          if (!p) continue;
-          // finalizePlan is safe to call during dry-run and will perform
-          // the same uniquePath/metadataTitle/year insertion and folder
-          // adjustments that applyPlans uses when creating files.
-          try {
-            await finalizePlan(p);
-          } catch (e) {
-            // Ignore per-plan finalization errors; preserve best-effort behavior
-          }
-        } catch (e) { /* per-plan best-effort */ }
-      }
-    } catch (e) { /* ignore normalize errors */ }
-    return plans;
-  }
+  const normalizePlansForPreview = normalizePlansForPreviewHelper;
 
   // Ensure any plan missing a year attempts a TVDB fetch when a tvdbId is present.
-  async function ensurePlanYears(plans: any[]) {
-    try {
-      for (const p of plans) {
-        try {
-          if (!p || !p.meta) continue;
-          if (p.meta.type === 'series' && !p.meta.year && p.meta.tvdbId) {
-            try {
-              const s = await getSeries(Number(p.meta.tvdbId));
-              const maybe = s?.firstAired || s?.firstAiredAt || s?.releaseDate || s?.released || s?.firstAiredDate
-                || (s?.attributes && (s.attributes.firstAired || s.attributes.firstAiredAt || s.attributes.releaseDate || s.attributes.released || s.attributes.firstAiredDate))
-                || (s?.data && (s.data.firstAired || s.data.firstAiredAt || s.data.releaseDate || s.data.released || s.data.firstAiredDate));
-              const y = maybe ? String(maybe).slice(0,4) : undefined;
-              if (y && /^\d{4}$/.test(y)) p.meta.year = Number(y);
-            } catch (e) { /* ignore per-plan */ }
-          }
-        } catch (e) { /* per-plan best-effort */ }
-      }
-    } catch (e) {}
-    return plans;
-  }
+  const ensurePlanYears = ensurePlanYearsHelper;
 
   // API routes
   // Health endpoint for production readiness checks
@@ -1051,7 +995,7 @@ async function bootstrap() {
         }
       } catch (e) { existing = {}; }
 
-      const normalize = (p: string) => String(p || '').replace(/\\+/g, '/');
+  const normalize = (p: string) => normalizePathForCache(String(p || ''));
 
       // If incoming is a map of libId->items (most common), merge per-library
       for (const libId of Object.keys(incoming || {})) {

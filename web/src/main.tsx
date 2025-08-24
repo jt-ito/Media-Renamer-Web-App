@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import ErrorBoundary from './components/ErrorBoundary';
+import RuntimeDiagnostic from './components/RuntimeDiagnostic';
 import './styles.css';
 
 const container = document.getElementById('root');
@@ -15,6 +16,7 @@ createRoot(container).render(
       <BrowserRouter>
         <App />
       </BrowserRouter>
+  <RuntimeDiagnostic />
     </ErrorBoundary>
   </React.StrictMode>
 );

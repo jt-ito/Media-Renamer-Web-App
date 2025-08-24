@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { pad2 } from '../lib/utils';
 
 type SettingsData = {
   libraryPath: string;
@@ -536,7 +537,7 @@ export function Settings() {
     const cleaned = str.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '');
     return cleaned.replace(/\s+/g, ' ').trim().replace(/^[. ]+|[. ]+$/g, '');
   }
-  function pad2(n: number) { return String(n).padStart(2, '0'); }
+  // pad2 imported from ../lib/utils
 
   function clientEpisodeOutput(libOutputRoot: string, libInputRoot: string | undefined, seriesNameRaw: string, seriesYear: number | undefined, seasonNum: number, eps: number[], episodeTitle: string | undefined, ext: string, seriesSchemeLocal?: string) {
     ext = ext ? String(ext) : '';
