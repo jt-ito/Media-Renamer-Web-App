@@ -52,7 +52,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const isProcessingRef = useRef(false);
   const scanItemsRef = useRef(scanItems);
   // per-library metadata for large libs and background scanning state
-  const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean; hideWhileScanning?: boolean; scannedComplete?: boolean }>>({});
+  const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean; hideWhileScanning?: boolean; scannedComplete?: boolean; scanFinished?: boolean }>>({});
   const observerRef = useRef<IntersectionObserver | null>(null);
   const shownLibrariesRef = useRef<typeof shownLibraries | null>(null as any);
   // Web Worker for heavy scanning tasks
@@ -79,6 +79,24 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const scannedUpdatesRef = useRef(new Map<string, any>());
   // temporary storage for per-library results when running a global "scan all"
   const completedScanResultsRef = useRef<Record<string, any[]>>({});
+  // helper to update scanItems with logging and a clear reason for later debugging
+  const updateScanItems = useCallback((libId: string, items: any[] | null, reason: string) => {
+    try {
+      const count = Array.isArray(items) ? items.length : 0;
+      console.debug(`[ScanManager] setScanItems lib=${libId} count=${count} reason=${reason} time=${new Date().toISOString()}`);
+    } catch (e) {}
+    try {
+      if (items == null) {
+        setScanItems(s => { const c = { ...s }; delete c[libId]; return c; });
+      } else {
+        setScanItems(s => ({ ...s, [libId]: items }));
+      }
+    } catch (e) {}
+  }, []);
+  const updateScanItemsMultiple = useCallback((map: Record<string, any[]>, reason: string) => {
+    try { console.debug(`[ScanManager] setScanItems multiple keys=${Object.keys(map).length} reason=${reason} time=${new Date().toISOString()}`); } catch (e) {}
+    try { setScanItems(s => ({ ...s, ...map })); } catch (e) {}
+  }, []);
   // delay between queued fetches to keep within API limits (ms)
   const RATE_DELAY_MS = 1500; // ~40 requests/min
   const IDLE_THRESHOLD_MS = 60_000; // start idle scan after 60s of inactivity
@@ -460,11 +478,11 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
           // If merged has content, restore it to state
           if (Object.keys(merged).length) {
-            setScanItems(merged);
+            updateScanItemsMultiple(merged, 'restore:server-cache');
             // mark restored libraries as fully-scanned (server-provided snapshots)
             try {
               for (const k of Object.keys(merged)) {
-                libraryMetaRef.current[k] = { ...(libraryMetaRef.current[k] || {}), scannedComplete: true };
+                libraryMetaRef.current[k] = { ...(libraryMetaRef.current[k] || {}), scannedComplete: true, scanFinished: true };
               }
             } catch (e) {}
           }
@@ -824,7 +842,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   setScanningMap(m => ({ ...m, [lib.id]: true }));
   // hide items until scan completes
   libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: true, scannedComplete: false };
-  setScanItems(s => ({ ...s, [lib.id]: [] }));
+  updateScanItems(lib.id, [], 'scanLibrary:start:clearItems');
     setScanOffset(0);
     setScanLoading(true);
     try {
@@ -838,10 +856,11 @@ export default function ScanManager({ buttons }: DashboardProps) {
       const items = data.items || [];
       // If server reports a very large library, only keep a small initial window
       // in client state and mark the library for background scanning.
-      const totalReported = data.total ?? (items.length || 0);
+  const totalReported = data.total ?? (items.length || 0);
+  const serverFinished = !!(data.scanFinished || data.finished || data.complete);
       // initialize progress and mark background running
       setScanProgress(p => ({ ...p, [lib.id]: { total: totalReported, done: 0, start: Date.now() } }));
-      libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), bgRunning: true };
+  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), bgRunning: true, scanFinished: serverFinished };
       // Stream pages and process items silently. We will reveal results when finished.
       const CONCURRENCY = 5;
       const PAGE_LIMIT = PREFETCH_BATCH_SIZE;
@@ -895,6 +914,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
           if (!pageRes.ok) break;
           const pageJs = await pageRes.json();
           const pageItems = pageJs.items || [];
+          // update serverFinished flag if provided on pages
+          try { if (pageJs.scanFinished || pageJs.finished || pageJs.complete) libraryMetaRef.current[lib.id].scanFinished = true; } catch (e) {}
           await processPage(pageItems);
           nextOffset = pageJs.nextOffset ?? (nextOffset + (pageItems.length || 0));
         } catch (e) { break; }
@@ -906,8 +927,10 @@ export default function ScanManager({ buttons }: DashboardProps) {
   // partials until the whole operation finishes.
   if (scanningAll) {
     completedScanResultsRef.current[lib.id] = accumulatedItems;
+    libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), scanFinished: true, scannedComplete: true };
   } else {
-    setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
+    updateScanItems(lib.id, accumulatedItems, 'scanLibrary:complete');
+    libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), scanFinished: true, scannedComplete: true };
   }
   // reveal items now that scan finished
   try { delete libraryMetaRef.current[lib.id].hideWhileScanning; } catch (e) {}
@@ -1702,7 +1725,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
               try {
                 const toMerge = completedScanResultsRef.current || {};
                 if (Object.keys(toMerge).length) {
-                  setScanItems(s => ({ ...s, ...toMerge }));
+                  updateScanItemsMultiple(toMerge, 'scanAll:mergeCompletedResults');
                 }
                 // clear stash and reset hideWhileScanning metadata
                 completedScanResultsRef.current = {};
