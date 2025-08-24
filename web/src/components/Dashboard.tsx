@@ -54,8 +54,16 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean }>>({});
   const observerRef = useRef<IntersectionObserver | null>(null);
   const shownLibrariesRef = useRef<typeof shownLibraries | null>(null);
+  // Web Worker for heavy scanning tasks
+  const workerRef = useRef<Worker | null>(null);
+  const pendingWorkerRequests = useRef(new Map<string, { resolve: (v:any)=>void, reject:(e:any)=>void }>());
   // avoid duplicating immediate fetches for the same visible item
   const inProgressImmediateRef = useRef(new Set<string>());
+  // inflight request dedupe: map dedupeKey -> Promise resolving to updatedItem|null
+  const inflightRequestsRef = useRef(new Map<string, Promise<any>>());
+  // short-lived in-memory response cache to avoid repeated requests across quick navigations
+  const responseCacheRef = useRef(new Map<string, { ts: number; value: any }>());
+  const RESPONSE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
   // keep track of which items are currently visible in the viewport
   const visibleSetRef = useRef(new Set<string>());
   // pending updates for items that were fetched while visible — apply when they leave view
@@ -84,6 +92,28 @@ export default function Dashboard({ buttons }: DashboardProps) {
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
   useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
+
+  // Initialize worker
+  useEffect(() => {
+    try {
+      // Create worker from module file (Vite supports new URL import)
+      const w = new Worker(new URL('../workers/scanWorker.ts', import.meta.url), { type: 'module' });
+      workerRef.current = w;
+      w.addEventListener('message', (ev: MessageEvent) => {
+        const msg = ev.data || {};
+        const { requestId, type } = msg;
+        const pending = pendingWorkerRequests.current.get(requestId as string);
+        if (!pending) return;
+        if (type === 'fetchEpisodeTitleResult') {
+          pending.resolve(msg.updatedItem || null);
+        } else {
+          pending.reject(msg.error || 'worker error');
+        }
+        pendingWorkerRequests.current.delete(requestId as string);
+      });
+      return () => { try { w.terminate(); } catch {} };
+    } catch (e) { /* worker failed, will use main-thread fallback */ }
+  }, []);
 
   const enqueueScan = useCallback((libId: string, itemId: string, front = false, silent = false) => {
   // update last activity (user triggered)
@@ -781,29 +811,58 @@ export default function Dashboard({ buttons }: DashboardProps) {
     const silent = !!(opts && opts.silent);
     if (!silent) setFetchingEpisodeMap(m => ({ ...m, [key]: true }));
   try {
-  const seriesName = inf.title || (inf.parsedName ? String(inf.parsedName).split(' - ')[0] : '');
-      if (!seriesName) return;
-  debug('looking up series on server for', seriesName);
-      // search TVDB for series id
-      const sres = await fetch(`/api/search?type=series&q=${encodeURIComponent(seriesName)}`);
-      if (!sres.ok) return;
-      const sjs = await sres.json();
-  debug('search results', sjs);
-      const results = sjs.data || sjs || [];
-      if (!Array.isArray(results) || !results.length) return;
-      // populate tvdb input with discovered series id
-      try {
-        const top = results[0];
-        if (top && top.id) setTvdbInputs(m => ({ ...m, [key]: { ...(m[key]||{ type: 'series' }), id: top.id, type: top.type || 'series' } }));
-      } catch {}
-      const seriesId = results[0].id;
-      const season = inf.season ?? 1;
-  debug('fetching episode title for seriesId', seriesId, 'season', season, 'episode', ep);
-      const eres = await fetch(`/api/episode-title?seriesId=${encodeURIComponent(String(seriesId))}&season=${encodeURIComponent(String(season))}&episode=${encodeURIComponent(String(ep))}`);
-      if (!eres.ok) return;
-      const ej = await eres.json();
-  debug('episode title response', ej);
-      const title = ej.title || null;
+    const seriesName = inf.title || (inf.parsedName ? String(inf.parsedName).split(' - ')[0] : '');
+    if (!seriesName) return;
+    const season = inf.season ?? 1;
+    const dedupeKey = `series:${seriesName.toLowerCase()}::s:${season}::e:${ep}`;
+
+    // attempt to reuse a short-lived cached response
+    let ej: any = null;
+    try {
+      const cached = responseCacheRef.current.get(dedupeKey);
+      if (cached && (Date.now() - cached.ts) < RESPONSE_CACHE_TTL_MS) {
+        debug('response cache hit for', dedupeKey);
+        ej = cached.value;
+      }
+    } catch (e) { /* ignore cache errors */ }
+
+    if (!ej) {
+      // If an inflight identical request exists, await it instead of issuing another
+      let promise = inflightRequestsRef.current.get(dedupeKey) as Promise<any> | undefined;
+      if (!promise) {
+        promise = (async () => {
+          debug('looking up series on server for', seriesName);
+          // search TVDB for series id
+          const sres = await fetch(`/api/search?type=series&q=${encodeURIComponent(seriesName)}`);
+          if (!sres.ok) return null;
+          const sjs = await sres.json();
+          const results = sjs.data || sjs || [];
+          if (!Array.isArray(results) || !results.length) return null;
+          // populate tvdb input with discovered series id
+          try {
+            const top = results[0];
+            if (top && top.id) setTvdbInputs(m => ({ ...m, [key]: { ...(m[key]||{ type: 'series' }), id: top.id, type: top.type || 'series' } }));
+          } catch {}
+          const seriesId = results[0].id;
+          debug('fetching episode title for seriesId', seriesId, 'season', season, 'episode', ep);
+          const eres = await fetch(`/api/episode-title?seriesId=${encodeURIComponent(String(seriesId))}&season=${encodeURIComponent(String(season))}&episode=${encodeURIComponent(String(ep))}`);
+          if (!eres.ok) return null;
+          const r = await eres.json();
+          // cache response
+          try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: r }); } catch (e) {}
+          return r;
+        })();
+        inflightRequestsRef.current.set(dedupeKey, promise);
+        // ensure we clean up inflight entry when done
+        promise.finally(() => { try { inflightRequestsRef.current.delete(dedupeKey); } catch {} });
+      } else {
+        debug('awaiting inflight request for', dedupeKey);
+      }
+
+      ej = await promise;
+    }
+    if (!ej) return;
+    const title = ej.title || null;
   if (title) {
         // merge back into item inferred
         const newInferred = { ...inf, episode_title: title };
