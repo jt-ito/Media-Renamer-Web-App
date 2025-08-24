@@ -1481,7 +1481,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
                   <div className="inline-block ml-4 p-2 bg-card/80 rounded shadow-sm text-sm">
                     <div className="flex items-center gap-2"> 
                       <div className="font-medium">Scanning</div>
-                      <span className="loader-dots"><span className="dot"/><span className="dot"/><span className="dot"/></span>
+                      <span className="loader-wave"><span className="b"/><span className="b"/><span className="b"/><span className="b"/></span>
                     </div>
                     <div className="mt-1">{done}/{total}</div>
                     <div className="text-xs text-muted">{etaSec !== null ? `ETA ${Math.round(etaSec)}s` : 'Estimating…'}</div>
@@ -1633,7 +1633,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
               setScanSummary((e?.message) ?? 'Scan failed');
             } finally { setScanningAll(false); setTimeout(() => setScanSummary(null), 4000); }
           }} disabled={scanningAll || loading || libraries.length === 0}>
-            {scanningAll ? (<span className="loader-dots"><span className="dot"/><span className="dot"/><span className="dot"/></span>) : 'Scan all libraries'}
+            {scanningAll ? (<span className="loader-wave"><span className="b"/><span className="b"/><span className="b"/><span className="b"/></span>) : 'Scan all libraries'}
           </button>
           <button title="Show or hide previously saved bulk scan results" className={buttons.base} onClick={() => setShowBulkResults(s => !s)} disabled={!bulkSaved}>
             {showBulkResults ? 'Hide bulk results' : 'View bulk results'}
