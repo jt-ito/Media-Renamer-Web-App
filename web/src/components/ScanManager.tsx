@@ -777,19 +777,16 @@ export default function ScanManager({ buttons }: DashboardProps) {
                         // merge only a small window into client state so UI remains responsive
                         // but if a full scan was explicitly started and hideWhileScanning is set,
                         // avoid revealing partial results until the full scan completes.
-                                        setScanItems(s => {
-                                          const cur = s[libId] || [];
-                                          const meta = libraryMetaRef.current[libId] || {} as any;
-                                          // If a global "scan all" is running, or hideWhileScanning/bgRunning
-                                          // are set for this library, avoid revealing partial results yet.
-                                          const prog = scanProgress[libId];
-                                          const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
-                                          if (scanningAll || meta.hideWhileScanning || meta.bgRunning || progIncomplete) {
-                                            return s;
-                                          }
-                                          const window = cur.concat(items).slice(0, INITIAL_WINDOW);
-                                          return { ...s, [libId]: window };
-                                        });
+                        try {
+                          const cur = (scanItemsRef.current || {})[libId] || [];
+                          const meta = libraryMetaRef.current[libId] || {} as any;
+                          const prog = scanProgress[libId];
+                          const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
+                          if (!(scanningAll || meta.hideWhileScanning || meta.bgRunning || progIncomplete)) {
+                            const windowItems = cur.concat(items).slice(0, INITIAL_WINDOW);
+                            updateScanItems(libId, windowItems, 'idlePrefetch:window');
+                          }
+                        } catch (e) {}
                         // enqueue silent scans for the returned items
                         for (const it of items) {
                           try {
@@ -1008,18 +1005,17 @@ export default function ScanManager({ buttons }: DashboardProps) {
       });
       if (!res.ok) throw new Error(`Scan failed (${res.status})`);
       const data = await res.json();
-      setScanItems(s => {
-        const cur = s[lib.id] || [];
+      try {
+        const cur = (scanItemsRef.current || {})[lib.id] || [];
         const meta = libraryMetaRef.current[lib.id] || {} as any;
-  // If full-scan hide flag is set, a background scan is still running,
-  // or the library scan progress shows it's incomplete, avoid revealing partial items until the scan completes
-  const prog = scanProgress[lib.id];
-  const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
-  if (meta.hideWhileScanning || meta.bgRunning || progIncomplete || !meta.scannedComplete) return s;
-        const merged = [...cur, ...(data.items || [])];
-        if (meta.large) return { ...s, [lib.id]: merged.slice(0, INITIAL_WINDOW) };
-        return { ...s, [lib.id]: merged };
-      });
+        const prog = scanProgress[lib.id];
+        const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
+        if (!(meta.hideWhileScanning || meta.bgRunning || progIncomplete || !meta.scannedComplete)) {
+          const merged = [...cur, ...(data.items || [])];
+          const toSet = meta.large ? merged.slice(0, INITIAL_WINDOW) : merged;
+          updateScanItems(lib.id, toSet, 'loadMore:merged');
+        }
+      } catch (e) {}
       try {
         const items = data.items || [];
         for (const it of items) {
