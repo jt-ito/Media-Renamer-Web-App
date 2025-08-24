@@ -741,8 +741,15 @@ export default function ScanManager({ buttons }: DashboardProps) {
                         const js = await res.json();
                         const items = js.items || [];
                         // merge only a small window into client state so UI remains responsive
+                        // but if a full scan was explicitly started and hideWhileScanning is set,
+                        // avoid revealing partial results until the full scan completes.
                         setScanItems(s => {
                           const cur = s[libId] || [];
+                          const meta = libraryMetaRef.current[libId] || {} as any;
+                          if (meta.hideWhileScanning) {
+                            // keep the current client state (likely empty) until reveal
+                            return s;
+                          }
                           const window = cur.concat(items).slice(0, INITIAL_WINDOW);
                           return { ...s, [libId]: window };
                         });
@@ -954,7 +961,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
       const data = await res.json();
       setScanItems(s => {
         const cur = s[lib.id] || [];
-        const meta = libraryMetaRef.current[lib.id] || {};
+        const meta = libraryMetaRef.current[lib.id] || {} as any;
+        // If full-scan hide flag is set, avoid revealing partial items until completed
+        if (meta.hideWhileScanning) return s;
         const merged = [...cur, ...(data.items || [])];
         if (meta.large) return { ...s, [lib.id]: merged.slice(0, INITIAL_WINDOW) };
         return { ...s, [lib.id]: merged };
