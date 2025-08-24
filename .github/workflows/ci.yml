@@ -15,8 +15,11 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Enable corepack and pnpm
-        run: corepack enable && corepack prepare pnpm@latest --activate
+      - name: Enable corepack and pin pnpm
+        run: |
+          corepack enable
+          # Pin pnpm to a specific version to avoid registry rate limits (429). Adjust version as needed.
+          corepack prepare pnpm@10.15.0 --activate
 
       - name: Install & build server
         working-directory: server
