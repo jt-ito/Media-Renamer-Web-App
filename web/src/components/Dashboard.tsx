@@ -433,10 +433,24 @@ export default function Dashboard({ buttons }: DashboardProps) {
             if (rawScan) sessionMap = JSON.parse(rawScan) as Record<string, any[]>;
           } catch (e) { sessionMap = {}; }
 
-          // Merge logic: server entries take precedence, but include any library
-          // keys present in sessionMap that server lacks.
-          const merged: Record<string, any[]> = { ...sessionMap };
-          for (const k of Object.keys(serverMap || {})) merged[k] = serverMap[k] || [];
+          // Merge logic: server entries take precedence, but avoid restoring
+          // items for libraries that are currently running in background so we
+          // don't reveal partially-scanned items. We still include session-only
+          // libraries when the server doesn't know about them and they aren't
+          // actively scanning.
+          const merged: Record<string, any[]> = {};
+          const meta = libraryMetaRef.current || {};
+          // Prefer server-provided entries when available and not actively scanning
+          for (const k of Object.keys(serverMap || {})) {
+            try { if (meta[k] && meta[k].bgRunning) continue; } catch (e) {}
+            merged[k] = serverMap[k] || [];
+          }
+          // Add any session-only entries that the server lacks (unless scanning)
+          for (const k of Object.keys(sessionMap || {})) {
+            if (merged[k]) continue;
+            try { if (meta[k] && meta[k].bgRunning) continue; } catch (e) {}
+            merged[k] = sessionMap[k] || [];
+          }
 
           // If merged has content, restore it to state
           if (Object.keys(merged).length) setScanItems(merged);

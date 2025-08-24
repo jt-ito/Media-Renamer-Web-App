@@ -80,19 +80,24 @@ export function Settings() {
         const res = await fetch('/api/settings');
         if (res.ok) {
           const data = (await res.json()) as Partial<SettingsData>;
+          // If server returned an essentially-empty object, prefer locally-saved
+          // settings so we don't wipe user prefs when the server hasn't fully
+          // populated settings yet.
+          const local = loadLocal();
+          const hasServerFields = data && (data.libraryPath || data.outputPath || data.naming || data.tvdbKey || (data as any).tvdbLanguage || data.port);
   const merged: SettingsData = {
-            libraryPath: data.libraryPath ?? '',
-            outputPath: data.outputPath ?? '',
+            libraryPath: hasServerFields ? (data.libraryPath ?? '') : (local?.libraryPath ?? ''),
+            outputPath: hasServerFields ? (data.outputPath ?? '') : (local?.outputPath ?? ''),
             naming: {
-              movie: data.naming?.movie ?? DEFAULT_MOVIE_SCHEME,
-              series: data.naming?.series ?? DEFAULT_SERIES_SCHEME,
+              movie: hasServerFields ? (data.naming?.movie ?? DEFAULT_MOVIE_SCHEME) : (local?.naming?.movie ?? DEFAULT_MOVIE_SCHEME),
+              series: hasServerFields ? (data.naming?.series ?? DEFAULT_SERIES_SCHEME) : (local?.naming?.series ?? DEFAULT_SERIES_SCHEME),
             },
-    tvdbKey: data.tvdbKey ?? '',
+    tvdbKey: hasServerFields ? (data.tvdbKey ?? '') : (local?.tvdbKey ?? ''),
     // server may store preferred language under tvdbLanguage
     // we'll surface it in the UI as 'tvdbLanguage'
     // default to 'en' when not provided
-    tvdbLanguage: (data as any).tvdbLanguage ?? 'en',
-            port: data.port
+    tvdbLanguage: hasServerFields ? ((data as any).tvdbLanguage ?? 'en') : (local as any)?.tvdbLanguage ?? 'en',
+            port: hasServerFields ? data.port : (local?.port ?? undefined)
           };
           if (!abort) {
             setInitial(merged);
