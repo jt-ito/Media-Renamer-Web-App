@@ -50,6 +50,8 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const scanQueuedSetRef = useRef(new Set<string>());
   const isProcessingRef = useRef(false);
   const scanItemsRef = useRef(scanItems);
+  // per-library metadata for large libs and background scanning state
+  const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean }>>({});
   const observerRef = useRef<IntersectionObserver | null>(null);
   const shownLibrariesRef = useRef<typeof shownLibraries | null>(null);
   // avoid duplicating immediate fetches for the same visible item
@@ -74,6 +76,11 @@ export default function Dashboard({ buttons }: DashboardProps) {
   // initial prefetch tuning (bigger prefetch and slightly longer timeout)
   const PREFETCH_COUNT = 20;
   const PREFETCH_TIMEOUT_MS = 8000;
+  // treat very large libraries specially to avoid loading many items into memory/DOM
+  const LARGE_LIBRARY_THRESHOLD = 2000; // library size above which we consider it "large"
+  const INITIAL_WINDOW = 200; // initial number of items to keep in client state for large libs
+  const PREFETCH_BATCH_SIZE = 200; // background batch size when scanning large libs
+  const IDLE_BATCH_DELAY_MS = 400; // delay between background batches to avoid hogging
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
   useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
@@ -510,23 +517,70 @@ export default function Dashboard({ buttons }: DashboardProps) {
         if (idleWorkerRef.current) return; // already running
         idleWorkerRef.current = true;
         try {
-          // Build a list of candidate items across libraries
+          // Build a list of candidate items across libraries. For very large
+          // libraries, prefer server-backed background scanning to avoid loading
+          // the entire item list into memory/DOM.
           const libs = scanItemsRef.current || {};
           for (const libId of Object.keys(libs)) {
             if (stopped) break;
-            const items = libs[libId] || [];
-            for (const it of items) {
-              if (stopped) break;
-              try {
-                const path = it?.path ? normalizePath(it.path) : null;
-                const key = `${libId}::${it.id}`;
-                if (!path) continue;
-                if (scannedPathsRef.current.has(path)) continue;
-                // Enqueue without front prioritization; idle worker should be quiet (silent)
-                enqueueScan(libId, it.id, false, true);
-                // yield a tick to avoid hogging CPU/network; no global rate limit per request
-                await new Promise(r => setTimeout(r, 250));
-              } catch (e) {}
+            const meta = libraryMetaRef.current[libId] || {};
+            if (meta.large) {
+              // kick off a background scan worker for large libraries if not running
+              if (!meta.bgRunning) {
+                (async () => {
+                  libraryMetaRef.current[libId] = { ...meta, bgRunning: true };
+                  try {
+                    // background batches fetch more items from server as needed
+                    while (!stopped) {
+                      // ask server for the next batch for this library
+                      const offset = libraryMetaRef.current[libId].nextOffset || 0;
+                      try {
+                        const res = await fetch(`/api/scan?offset=${offset}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ libraryId: libId, limit: PREFETCH_BATCH_SIZE }) });
+                        if (!res.ok) break;
+                        const js = await res.json();
+                        const items = js.items || [];
+                        // merge only a small window into client state so UI remains responsive
+                        setScanItems(s => {
+                          const cur = s[libId] || [];
+                          const window = cur.concat(items).slice(0, INITIAL_WINDOW);
+                          return { ...s, [libId]: window };
+                        });
+                        // enqueue silent scans for the returned items
+                        for (const it of items) {
+                          try {
+                            if (!it || !it.path) continue;
+                            const p = normalizePath(it.path);
+                            if (scannedPathsRef.current.has(p)) continue;
+                            enqueueScan(libId, it.id, false, true);
+                          } catch (e) {}
+                        }
+                        // update nextOffset from server if provided
+                        if (typeof js.nextOffset === 'number') libraryMetaRef.current[libId].nextOffset = js.nextOffset;
+                        if (!items.length || (js.nextOffset == null && items.length < PREFETCH_BATCH_SIZE)) break;
+                      } catch (e) { break; }
+                      // be polite between batches
+                      await new Promise(r => setTimeout(r, IDLE_BATCH_DELAY_MS));
+                    }
+                  } finally {
+                    libraryMetaRef.current[libId] = { ...libraryMetaRef.current[libId], bgRunning: false };
+                  }
+                })();
+              }
+            } else {
+              const items = libs[libId] || [];
+              for (const it of items) {
+                if (stopped) break;
+                try {
+                  const path = it?.path ? normalizePath(it.path) : null;
+                  const key = `${libId}::${it.id}`;
+                  if (!path) continue;
+                  if (scannedPathsRef.current.has(path)) continue;
+                  // Enqueue without front prioritization; idle worker should be quiet (silent)
+                  enqueueScan(libId, it.id, false, true);
+                  // yield a tick to avoid hogging CPU/network; no global rate limit per request
+                  await new Promise(r => setTimeout(r, 250));
+                } catch (e) {}
+              }
             }
           }
         } finally { idleWorkerRef.current = false; }
@@ -553,7 +607,16 @@ export default function Dashboard({ buttons }: DashboardProps) {
       if (!res.ok) throw new Error(`Scan failed (${res.status})`);
       const data = await res.json();
       const items = data.items || [];
-      setScanItems(s => ({ ...s, [lib.id]: items }));
+      // If server reports a very large library, only keep a small initial window
+      // in client state and mark the library for background scanning.
+      const totalReported = data.total ?? (items.length || 0);
+      if (totalReported > LARGE_LIBRARY_THRESHOLD) {
+        libraryMetaRef.current[lib.id] = { large: true, total: totalReported, nextOffset: data.nextOffset ?? items.length };
+        setScanItems(s => ({ ...s, [lib.id]: (items || []).slice(0, INITIAL_WINDOW) }));
+      } else {
+        libraryMetaRef.current[lib.id] = { large: false, total: totalReported, nextOffset: data.nextOffset ?? items.length };
+        setScanItems(s => ({ ...s, [lib.id]: items }));
+      }
       // Kick off a short initial prefetch so the first items are scanned quickly.
       // This helps when libraries are large and AUTO_PREVIEW_LIMIT prevents eager processing.
       (async () => {
@@ -608,7 +671,13 @@ export default function Dashboard({ buttons }: DashboardProps) {
       });
       if (!res.ok) throw new Error(`Scan failed (${res.status})`);
       const data = await res.json();
-      setScanItems(s => ({ ...s, [lib.id]: [...(s[lib.id] || []), ...(data.items || [])] }));
+      setScanItems(s => {
+        const cur = s[lib.id] || [];
+        const meta = libraryMetaRef.current[lib.id] || {};
+        const merged = [...cur, ...(data.items || [])];
+        if (meta.large) return { ...s, [lib.id]: merged.slice(0, INITIAL_WINDOW) };
+        return { ...s, [lib.id]: merged };
+      });
       try {
         const items = data.items || [];
         for (const it of items) {
