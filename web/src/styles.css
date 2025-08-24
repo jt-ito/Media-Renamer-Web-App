@@ -202,6 +202,23 @@ header {
   white-space: pre-wrap;
 }
 
+/* Scan list entries: a little larger and visually separated with a top border */
+.scan-item {
+  padding: 12px; /* slightly larger touch target */
+  padding-left: 14px;
+  padding-right: 14px;
+  border-top: 1px solid var(--border);
+  background: transparent;
+}
+.scan-item .font-mono {
+  /* make displayed paths a little easier to read */
+  font-size: 0.95rem;
+}
+.scan-item .text-xl {
+  /* slightly larger emoji/icon */
+  font-size: 1.3rem;
+}
+
 /* Three-dot loader (lightweight) inspired by simple CSS loading animations */
 .loader-wave {
   display: inline-block;

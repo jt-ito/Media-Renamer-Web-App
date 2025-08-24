@@ -492,18 +492,22 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
   // Persist scanItems to sessionStorage so navigating away (to Settings) doesn't lose results
   useEffect(() => {
-    let didWriteServer = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scanItems || {}) });
-        if (res.ok) didWriteServer = true;
-      } catch (e) {
-        didWriteServer = false;
-      }
-      try {
-        sessionStorage.setItem('dashboard.scanItems', JSON.stringify(scanItems || {}));
-      } catch (e) { /* ignore */ }
-    })();
+    // Debounced persistence to server and sessionStorage. Cancels/restarts
+    // when scanItems changes rapidly to avoid network storms.
+    let cancelled = false;
+    const id = setTimeout(() => {
+      (async () => {
+        try {
+          await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scanItems || {}) });
+        } catch (e) {
+          // ignore transient network errors; sessionStorage still writes below
+        }
+        try {
+          sessionStorage.setItem('dashboard.scanItems', JSON.stringify(scanItems || {}));
+        } catch (e) { /* ignore */ }
+      })();
+    }, 500);
+    return () => { cancelled = true; clearTimeout(id); };
   }, [scanItems]);
 
   // (previewVersion removed) previewPlans changes are applied directly to state
@@ -1539,8 +1543,14 @@ export default function ScanManager({ buttons }: DashboardProps) {
               const vstate = virtualListStateRef.current[vsKey];
               const getSize = (index: number) => vstate.sizeMap[index] || 120;
               const setSize = (index: number, size: number) => {
-                if (vstate.sizeMap[index] !== size) {
-                  vstate.sizeMap[index] = size;
+                // Normalize size to avoid sub-pixel jitter and only reset when
+                // the change is meaningful (>2px). This prevents react-window
+                // from re-rendering the list continuously which causes hover
+                // flicker and lost clicks.
+                const normalized = Math.round(size || 0);
+                const prev = vstate.sizeMap[index] || 0;
+                if (Math.abs(prev - normalized) > 2) {
+                  vstate.sizeMap[index] = normalized;
                   try { vstate.listRef.current?.resetAfterIndex(index); } catch (e) {}
                 }
               };
@@ -1577,15 +1587,15 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
                 return (
                   <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
-                    <div ref={refCallback} className="p-2" style={{ marginBottom: 6 }}>
+                    <div ref={refCallback} className="scan-item">
                       {!hydrated ? (
-                        <div className="font-mono text-sm break-all">{item.path}</div>
+                        <div className="font-mono break-all">{item.path}</div>
                       ) : (
                         <div className="flex items-center gap-3">
                           <div className="text-xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
                           <div className="flex-1">
-                            <div className="font-mono text-sm break-all">{item.path}</div>
-                            <div className="text-xs text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
+                            <div className="font-mono break-all">{item.path}</div>
+                            <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
                           </div>
                           <div className="flex items-center gap-2">
                             <button className={buttons.base} onClick={() => rescanItem(lib, item)}>🔄</button>
