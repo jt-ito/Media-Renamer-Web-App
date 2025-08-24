@@ -77,6 +77,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const idleWorkerRef = useRef(false);
   // map of normalized path -> updated item (persisted immediately when discovered)
   const scannedUpdatesRef = useRef(new Map<string, any>());
+  // temporary storage for per-library results when running a global "scan all"
+  const completedScanResultsRef = useRef<Record<string, any[]>>({});
   // delay between queued fetches to keep within API limits (ms)
   const RATE_DELAY_MS = 1500; // ~40 requests/min
   const IDLE_THRESHOLD_MS = 60_000; // start idle scan after 60s of inactivity
@@ -749,16 +751,17 @@ export default function ScanManager({ buttons }: DashboardProps) {
                         // merge only a small window into client state so UI remains responsive
                         // but if a full scan was explicitly started and hideWhileScanning is set,
                         // avoid revealing partial results until the full scan completes.
-                        setScanItems(s => {
-                          const cur = s[libId] || [];
-                          const meta = libraryMetaRef.current[libId] || {} as any;
-                          // If hideWhileScanning or bgRunning (still in progress), keep current state
-                          if (meta.hideWhileScanning || meta.bgRunning) {
-                            return s;
-                          }
-                          const window = cur.concat(items).slice(0, INITIAL_WINDOW);
-                          return { ...s, [libId]: window };
-                        });
+                                        setScanItems(s => {
+                                          const cur = s[libId] || [];
+                                          const meta = libraryMetaRef.current[libId] || {} as any;
+                                          // If a global "scan all" is running, or hideWhileScanning/bgRunning
+                                          // are set for this library, avoid revealing partial results yet.
+                                          if (scanningAll || meta.hideWhileScanning || meta.bgRunning) {
+                                            return s;
+                                          }
+                                          const window = cur.concat(items).slice(0, INITIAL_WINDOW);
+                                          return { ...s, [libId]: window };
+                                        });
                         // enqueue silent scans for the returned items
                         for (const it of items) {
                           try {
@@ -889,7 +892,13 @@ export default function ScanManager({ buttons }: DashboardProps) {
   // scanning finished: reveal items (accumulated) and persist
   // update ref and sessionStorage immediately so navigating away and back restores items
   try { persistScanItemsNow(lib.id, accumulatedItems); } catch (e) {}
-  setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
+  // If a global "scan all" is in progress, stash results and avoid revealing per-library
+  // partials until the whole operation finishes.
+  if (scanningAll) {
+    completedScanResultsRef.current[lib.id] = accumulatedItems;
+  } else {
+    setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
+  }
   // reveal items now that scan finished
   try { delete libraryMetaRef.current[lib.id].hideWhileScanning; } catch (e) {}
   try { persistScanState(lib.id); } catch (e) {}
@@ -1530,7 +1539,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
         </div>
 
         <div className="mt-3 space-y-2">
-          {libraryMetaRef.current[lib.id]?.hideWhileScanning ? (
+          {scanningAll ? (
+            <div className="text-sm text-muted">Scanning all libraries… results will appear when complete.</div>
+          ) : libraryMetaRef.current[lib.id]?.hideWhileScanning ? (
             <div className="text-sm text-muted">Scanning library… results will appear when complete.</div>
           ) : itemsToShow.length === 0 ? (
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
@@ -1663,6 +1674,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
               // Use the same streaming/hidden-until-complete scan flow for each library
               for (const lib of libraries) {
                 try {
+                  // ensure this library hides partial results while global scan runs
+                  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: true };
                   await scanLibrary(lib);
                 } catch (e: any) {
                   // Continue to next library but record summary
@@ -1672,7 +1685,22 @@ export default function ScanManager({ buttons }: DashboardProps) {
               }
             } catch (e: any) {
               setScanSummary((e?.message) ?? 'Scan failed');
-            } finally { setScanningAll(false); setTimeout(() => setScanSummary(null), 4000); }
+            } finally {
+              // Merge any stashed per-library results collected during scanningAll
+              try {
+                const toMerge = completedScanResultsRef.current || {};
+                if (Object.keys(toMerge).length) {
+                  setScanItems(s => ({ ...s, ...toMerge }));
+                }
+                // clear stash and reset hideWhileScanning metadata
+                completedScanResultsRef.current = {};
+                for (const lib of libraries) {
+                  try { if (libraryMetaRef.current[lib.id]) delete libraryMetaRef.current[lib.id].hideWhileScanning; } catch (e) {}
+                }
+              } catch (e) {}
+              setScanningAll(false);
+              setTimeout(() => setScanSummary(null), 4000);
+            }
           }} disabled={scanningAll || loading || libraries.length === 0}>
             {scanningAll ? (<span className="loader-wave"><span className="b"/><span className="b"/><span className="b"/><span className="b"/></span>) : 'Scan all libraries'}
           </button>
