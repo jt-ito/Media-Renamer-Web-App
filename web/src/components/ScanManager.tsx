@@ -1545,36 +1545,38 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 const item = itemsToShow[index];
                 const mapKey = `${lib.id}::${item.id}`;
                 const hydrated = !!hydratedMap[mapKey];
-                const elRef = useRef<HTMLDivElement | null>(null);
-                // measure after render
-                useEffect(() => {
-                  const el = elRef.current;
-                  if (!el) return;
-                  const measure = () => setSize(index, Math.ceil(el.getBoundingClientRect().height));
-                  measure();
-                  // fallback resize observer where available
-                  let ro: ResizeObserver | null = null;
+                // ref callback to measure element height without hooks (react-window render-prop)
+                const refCallback = (el: HTMLDivElement | null) => {
                   try {
-                    if ((window as any).ResizeObserver) {
-                      ro = new (window as any).ResizeObserver(() => measure());
-                      if (ro && el) ro.observe(el);
-                    }
-                  } catch (e) {}
-                  return () => { try { if (ro) ro.disconnect(); } catch {} };
-                }, [index]);
+                    // disconnect previous observer if present on the element
+                    if (el === null) return; // removed
+                    // If a previous observer exists on this element, disconnect it first
+                    try { const prev = (el as any).__mr_ro; if (prev) try { prev.disconnect(); } catch {} } catch {}
+                    const measure = () => setSize(index, Math.ceil(el.getBoundingClientRect().height));
+                    measure();
+                    // attach a ResizeObserver to update on dynamic changes
+                    try {
+                      if ((window as any).ResizeObserver) {
+                        const ro = new (window as any).ResizeObserver(() => measure());
+                        (el as any).__mr_ro = ro;
+                        ro.observe(el);
+                      }
+                    } catch (e) { /* ignore RO errors */ }
+                  } catch (e) { /* ignore measure errors */ }
+                };
 
                 // If the library is hidden during scan, render a compact placeholder
                 if (libraryMetaRef.current[lib.id] && libraryMetaRef.current[lib.id].hideWhileScanning) {
                   return (
                     <div style={style} key={item.id}>
-                      <div ref={elRef} className="p-2 text-sm text-muted">Scanning… results will appear when the scan completes.</div>
+                      <div ref={refCallback} className="p-2 text-sm text-muted">Scanning… results will appear when the scan completes.</div>
                     </div>
                   );
                 }
 
                 return (
                   <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
-                    <div ref={elRef} className="p-2" style={{ marginBottom: 6 }}>
+                    <div ref={refCallback} className="p-2" style={{ marginBottom: 6 }}>
                       {!hydrated ? (
                         <div className="font-mono text-sm break-all">{item.path}</div>
                       ) : (
