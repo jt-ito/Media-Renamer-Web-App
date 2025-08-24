@@ -82,7 +82,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   // virtualization threshold: switch to react-window when list length exceeds this
   const LIST_VIRTUALIZE_THRESHOLD = 80;
   // initial prefetch tuning (bigger prefetch and slightly longer timeout)
-  const PREFETCH_COUNT = 20;
+  const PREFETCH_COUNT = 12;
   const PREFETCH_TIMEOUT_MS = 8000;
   // treat very large libraries specially to avoid loading many items into memory/DOM
   const LARGE_LIBRARY_THRESHOLD = 2000; // library size above which we consider it "large"
@@ -837,39 +837,66 @@ export default function Dashboard({ buttons }: DashboardProps) {
     } catch (e) { /* ignore cache errors */ }
 
     if (!ej) {
-      // If an inflight identical request exists, await it instead of issuing another
-      let promise = inflightRequestsRef.current.get(dedupeKey) as Promise<any> | undefined;
-      if (!promise) {
-        promise = (async () => {
-          debug('looking up series on server for', seriesName);
-          // search TVDB for series id
-          const sres = await fetch(`/api/search?type=series&q=${encodeURIComponent(seriesName)}`);
-          if (!sres.ok) return null;
-          const sjs = await sres.json();
-          const results = sjs.data || sjs || [];
-          if (!Array.isArray(results) || !results.length) return null;
-          // populate tvdb input with discovered series id
-          try {
-            const top = results[0];
-            if (top && top.id) setTvdbInputs(m => ({ ...m, [key]: { ...(m[key]||{ type: 'series' }), id: top.id, type: top.type || 'series' } }));
-          } catch {}
-          const seriesId = results[0].id;
-          debug('fetching episode title for seriesId', seriesId, 'season', season, 'episode', ep);
-          const eres = await fetch(`/api/episode-title?seriesId=${encodeURIComponent(String(seriesId))}&season=${encodeURIComponent(String(season))}&episode=${encodeURIComponent(String(ep))}`);
-          if (!eres.ok) return null;
-          const r = await eres.json();
-          // cache response
-          try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: r }); } catch (e) {}
-          return r;
-        })();
-        inflightRequestsRef.current.set(dedupeKey, promise);
-        // ensure we clean up inflight entry when done
-        promise.finally(() => { try { inflightRequestsRef.current.delete(dedupeKey); } catch {} });
-      } else {
-        debug('awaiting inflight request for', dedupeKey);
+      // Try worker offload first when available
+      const w = workerRef.current;
+      if (w) {
+        try {
+          const requestId = `${Date.now()}-${Math.random().toString(36).slice(2,9)}`;
+          const p = new Promise<any>((resolve, reject) => {
+            const timer = setTimeout(() => { pendingWorkerRequests.current.delete(requestId); reject(new Error('worker timeout')); }, 10000);
+            pendingWorkerRequests.current.set(requestId, {
+              resolve: (v:any) => { clearTimeout(timer); resolve(v); },
+              reject: (e:any) => { clearTimeout(timer); reject(e); }
+            });
+          });
+          w.postMessage({ requestId, type: 'fetchEpisodeTitle', lib, item });
+          const res = await p.catch((e) => { debug('worker failed', e); return null; });
+          if (res && res.inferred) {
+            // worker returned updatedItem
+            ej = { title: res.inferred?.episode_title || null, _workerUpdatedItem: res };
+            // cache raw worker response shape for dedupe key (store minimal)
+            try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: { title: ej.title } }); } catch(e){}
+          }
+        } catch (e) {
+          debug('worker offload error', e);
+        }
       }
 
-      ej = await promise;
+      if (!ej) {
+        // If an inflight identical request exists, await it instead of issuing another
+        let promise = inflightRequestsRef.current.get(dedupeKey) as Promise<any> | undefined;
+        if (!promise) {
+          promise = (async () => {
+            debug('looking up series on server for', seriesName);
+            // search TVDB for series id
+            const sres = await fetch(`/api/search?type=series&q=${encodeURIComponent(seriesName)}`);
+            if (!sres.ok) return null;
+            const sjs = await sres.json();
+            const results = sjs.data || sjs || [];
+            if (!Array.isArray(results) || !results.length) return null;
+            // populate tvdb input with discovered series id
+            try {
+              const top = results[0];
+              if (top && top.id) setTvdbInputs(m => ({ ...m, [key]: { ...(m[key]||{ type: 'series' }), id: top.id, type: top.type || 'series' } }));
+            } catch {}
+            const seriesId = results[0].id;
+            debug('fetching episode title for seriesId', seriesId, 'season', season, 'episode', ep);
+            const eres = await fetch(`/api/episode-title?seriesId=${encodeURIComponent(String(seriesId))}&season=${encodeURIComponent(String(season))}&episode=${encodeURIComponent(String(ep))}`);
+            if (!eres.ok) return null;
+            const r = await eres.json();
+            // cache response
+            try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: r }); } catch (e) {}
+            return r;
+          })();
+          inflightRequestsRef.current.set(dedupeKey, promise);
+          // ensure we clean up inflight entry when done
+          promise.finally(() => { try { inflightRequestsRef.current.delete(dedupeKey); } catch {} });
+        } else {
+          debug('awaiting inflight request for', dedupeKey);
+        }
+
+        ej = await promise;
+      }
     }
     if (!ej) return;
     const title = ej.title || null;
