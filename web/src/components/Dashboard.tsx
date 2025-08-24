@@ -423,9 +423,32 @@ export default function Dashboard({ buttons }: DashboardProps) {
         const r = await fetch('/api/scan-cache');
         if (r.ok) {
           const js = await r.json();
-          if (js && Object.keys(js || {}).length) {
-            setScanItems(js || {});
-          }
+          // Merge server cache with any existing sessionStorage state so
+          // transient items discovered by the client but not yet flushed to
+          // the server are preserved when returning from Settings.
+          const serverMap = (js && typeof js === 'object') ? js as Record<string, any[]> : {};
+          let sessionMap: Record<string, any[]> = {};
+          try {
+            const rawScan = sessionStorage.getItem('dashboard.scanItems');
+            if (rawScan) sessionMap = JSON.parse(rawScan) as Record<string, any[]>;
+          } catch (e) { sessionMap = {}; }
+
+          // Merge logic: server entries take precedence, but include any library
+          // keys present in sessionMap that server lacks.
+          const merged: Record<string, any[]> = { ...sessionMap };
+          for (const k of Object.keys(serverMap || {})) merged[k] = serverMap[k] || [];
+
+          // If merged has content, restore it to state
+          if (Object.keys(merged).length) setScanItems(merged);
+        } else {
+          // server returned non-OK; fallback to sessionStorage
+          try {
+            const rawScan = sessionStorage.getItem('dashboard.scanItems');
+            if (rawScan) {
+              const parsed = JSON.parse(rawScan) as Record<string, any[]>;
+              setScanItems(parsed || {});
+            }
+          } catch {}
         }
       } catch (e) {
         // fallback to sessionStorage when server call fails
