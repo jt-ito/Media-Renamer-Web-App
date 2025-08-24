@@ -122,7 +122,14 @@ export default function ScanManager({ buttons }: DashboardProps) {
       const raw = sessionStorage.getItem('dashboard.scanItems');
       if (raw) {
         const parsed = JSON.parse(raw) as Record<string, any[]>;
-        if (parsed && typeof parsed === 'object') setScanItems(parsed);
+        if (parsed && typeof parsed === 'object') {
+          // Do not apply session-restored items directly to UI state to avoid
+          // revealing partial results from a previous interrupted scan. Store
+          // them in refs so they can be merged later when we confirm the
+          // library is fully scanned (server-backed) or when a scan finishes.
+          try { scanItemsRef.current = parsed; } catch (e) {}
+          try { completedScanResultsRef.current = { ...completedScanResultsRef.current, ...parsed }; } catch (e) {}
+        }
       }
     } catch (e) {}
     try {
@@ -478,13 +485,21 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
           // If merged has content, restore it to state
           if (Object.keys(merged).length) {
-            updateScanItemsMultiple(merged, 'restore:server-cache');
-            // mark restored libraries as fully-scanned (server-provided snapshots)
+            const toApply: Record<string, any[]> = {};
+            // Only apply merged entries for libraries that the server marked as finished.
             try {
               for (const k of Object.keys(merged)) {
-                libraryMetaRef.current[k] = { ...(libraryMetaRef.current[k] || {}), scannedComplete: true, scanFinished: true };
+                const meta = libraryMetaRef.current[k] || {} as any;
+                if (meta.scanFinished || meta.scannedComplete) {
+                  toApply[k] = merged[k];
+                  libraryMetaRef.current[k] = { ...(libraryMetaRef.current[k] || {}), scannedComplete: true, scanFinished: true };
+                } else {
+                  // stash for later merge when scan finishes
+                  completedScanResultsRef.current[k] = merged[k];
+                }
               }
             } catch (e) {}
+            if (Object.keys(toApply).length) updateScanItemsMultiple(toApply, 'restore:server-cache:applied');
           }
         } else {
           // server returned non-OK; fallback to sessionStorage
