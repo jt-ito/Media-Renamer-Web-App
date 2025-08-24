@@ -372,11 +372,11 @@ async function bootstrap() {
     }
 
     // Ensure the configured library path exists on this host before scanning.
-    if (!lib.inputRoot || !fs.existsSync(lib.inputRoot)) {
-      // Best-effort: try common alternative mount locations inside the container
-      // (for example, host path /mnt/sda1/Foo might be mounted at /media/Foo inside
-      // the container). If we find a candidate that exists, use it instead.
-      try {
+    try {
+      if (!lib.inputRoot || !fs.existsSync(lib.inputRoot)) {
+        // Best-effort: try common alternative mount locations inside the container
+        // (for example, host path /mnt/sda1/Foo might be mounted at /media/Foo inside
+        // the container). If we find a candidate that exists, use it instead.
         const orig = String(lib.inputRoot || '');
         const candidates: string[] = [];
         // Map /mnt/<device>/rest -> /media/rest
@@ -415,10 +415,10 @@ async function bootstrap() {
                   const cand = path.join('/media', ent, lastPart);
                   if (fs.existsSync(cand)) { found = path.resolve(cand); break; }
                   // Also try matching deeper suffix of the original path
-                  const rest = orig.replace(/^\/+/,'').split('/');
+                  const rest = orig.replace(/^\/+/, '').split('/');
                   for (let i = 1; i <= rest.length && !found; i++) {
-                    const suffix = rest.slice(rest.length - i).join('/');
-                    const cand2 = path.join('/media', ent, suffix);
+                    const suffix2 = rest.slice(rest.length - i).join('/');
+                    const cand2 = path.join('/media', ent, suffix2);
                     if (fs.existsSync(cand2)) { found = path.resolve(cand2); break; }
                   }
                 } catch (e) { /* ignore per-entry */ }
@@ -435,11 +435,11 @@ async function bootstrap() {
           reply.status(400).send({ error: 'Library path does not exist or is inaccessible on the server. Check that the host path is mounted into the container and permissions allow reading.' });
           return;
         }
-      } catch (e) {
-        log('error', `Scan failed: library path does not exist or is inaccessible: ${lib.inputRoot}`);
-        reply.status(400).send({ error: 'Library path does not exist or is inaccessible on the server. Check that the host path is mounted into the container and permissions allow reading.' });
-        return;
       }
+    } catch (e: any) {
+      log('error', `Scan failed: ${e?.message ?? String(e)}`);
+      reply.status(500).send({ error: 'Scan failed' });
+      return;
     }
 
     const patterns = ['**/*.mkv', '**/*.mp4', '**/*.avi', '**/*.mov', '**/*.m4v'];
@@ -480,6 +480,31 @@ async function bootstrap() {
         return { id: idFromPath(f), path: f, size, ext, libraryId, inferred };
       })
     );
+
+    // Apply any cached scan results from server-side scan-cache so we don't re-scan items
+    try {
+      const SCAN_CACHE_PATH = process.env.SCAN_CACHE_PATH || path.resolve(__dirname, '..', 'config', 'scan-cache.json');
+      if (fs.existsSync(SCAN_CACHE_PATH)) {
+        try {
+          const raw = fs.readFileSync(SCAN_CACHE_PATH, 'utf8') || '{}';
+          const parsed = JSON.parse(raw || '{}') || {};
+          const libCache = parsed[lib.id] || [];
+          if (Array.isArray(libCache) && libCache.length) {
+            const byPath = new Map<string, any>();
+            for (const it of libCache) {
+              try { byPath.set(String(it.path || '').replace(/\\+/g, '/'), it); } catch (e) {}
+            }
+            // Replace items with cached entries when paths match
+            for (let i = 0; i < items.length; i++) {
+              try {
+                const p = String(items[i].path || '').replace(/\\+/g, '/');
+                if (byPath.has(p)) items[i] = byPath.get(p);
+              } catch (e) {}
+            }
+          }
+        } catch (e) { /* ignore parse errors */ }
+      }
+    } catch (e) { /* best-effort */ }
 
     return {
       items,
@@ -991,6 +1016,12 @@ async function bootstrap() {
     try {
       const body = req.body as { level?: string };
       const lvl = (body && String(body.level || '').toLowerCase()) as any;
+    if (!['info','warn','error','debug'].includes(lvl)) return reply.status(400).send({ error: 'invalid level' });
+    const { setLogLevel } = await import('./logging.js');
+    setLogLevel(lvl);
+    return { ok: true, level: lvl };
+    } catch (e) { reply.status(500).send({ error: 'failed' }); }
+  });
 
   // Scan-cache file endpoints: persist scan results to disk so the UI can
   // restore them across navigation and server restarts. Path may be overridden
@@ -1007,11 +1038,61 @@ async function bootstrap() {
     }
   });
 
+  // POST merges incoming scanned items into existing cache (by normalized path)
   app.post('/api/scan-cache', async (req, reply) => {
     try {
-      const body = req.body || {};
+      const incoming: any = req.body || {};
       fs.mkdirSync(path.dirname(SCAN_CACHE_PATH), { recursive: true });
-      fs.writeFileSync(SCAN_CACHE_PATH, JSON.stringify(body || {}, null, 2), 'utf8');
+      let existing: Record<string, any> = {};
+      try {
+        if (fs.existsSync(SCAN_CACHE_PATH)) {
+          const raw = fs.readFileSync(SCAN_CACHE_PATH, 'utf8') || '{}';
+          existing = JSON.parse(raw) || {};
+        }
+      } catch (e) { existing = {}; }
+
+      const normalize = (p: string) => String(p || '').replace(/\\+/g, '/');
+
+      // If incoming is a map of libId->items (most common), merge per-library
+      for (const libId of Object.keys(incoming || {})) {
+        const arr = incoming[libId];
+        if (!Array.isArray(arr)) continue;
+        existing[libId] = existing[libId] || [];
+        const byPath = new Map<string, any>();
+        for (const it of existing[libId]) {
+          try { byPath.set(normalize(it.path), it); } catch (e) {}
+        }
+        for (const it of arr) {
+          try {
+            const np = normalize(it.path);
+            byPath.set(np, it);
+          } catch (e) {}
+        }
+        existing[libId] = Array.from(byPath.values());
+      }
+
+      // Also accept a flat map of path->item (e.g., scannedUpdates) and merge
+      if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
+        // check if keys look like normalized paths (contain / or \)
+        const keys = Object.keys(incoming);
+        const looksLikePathMap = keys.length && keys.every(k => typeof k === 'string' && (k.indexOf('/') !== -1 || k.indexOf('\\') !== -1));
+        if (looksLikePathMap) {
+          // merge each item into its declared lib if present, otherwise into '__unassigned'
+          for (const k of keys) {
+            try {
+              const it = incoming[k];
+              const np = normalize(k);
+              const libId = String(it?.libraryId || it?.libId || it?.library || '__unassigned');
+              existing[libId] = existing[libId] || [];
+              const idx = existing[libId].findIndex((x:any) => normalize(x.path) === np);
+              if (idx >= 0) existing[libId][idx] = it;
+              else existing[libId].push(it);
+            } catch (e) {}
+          }
+        }
+      }
+
+      fs.writeFileSync(SCAN_CACHE_PATH, JSON.stringify(existing || {}, null, 2), 'utf8');
       return reply.send({ ok: true });
     } catch (e: any) {
       return reply.status(500).send({ error: String(e?.message || e) });
@@ -1025,12 +1106,6 @@ async function bootstrap() {
     } catch (e) {
       return { ok: false, error: String(e) };
     }
-  });
-      if (!['info','warn','error','debug'].includes(lvl)) return reply.status(400).send({ error: 'invalid level' });
-      const { setLogLevel } = await import('./logging.js');
-      setLogLevel(lvl);
-      return { ok: true, level: lvl };
-    } catch (e) { reply.status(500).send({ error: 'failed' }); }
   });
 
   // Effective port: environment overrides persisted settings; otherwise use settings.port if set
