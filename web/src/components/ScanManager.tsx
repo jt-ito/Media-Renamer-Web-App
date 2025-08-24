@@ -52,7 +52,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const isProcessingRef = useRef(false);
   const scanItemsRef = useRef(scanItems);
   // per-library metadata for large libs and background scanning state
-  const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean; hideWhileScanning?: boolean }>>({});
+  const libraryMetaRef = useRef<Record<string, { large?: boolean; total?: number; nextOffset?: number; bgRunning?: boolean; hideWhileScanning?: boolean; scannedComplete?: boolean }>>({});
   const observerRef = useRef<IntersectionObserver | null>(null);
   const shownLibrariesRef = useRef<typeof shownLibraries | null>(null as any);
   // Web Worker for heavy scanning tasks
@@ -459,7 +459,15 @@ export default function ScanManager({ buttons }: DashboardProps) {
           }
 
           // If merged has content, restore it to state
-          if (Object.keys(merged).length) setScanItems(merged);
+          if (Object.keys(merged).length) {
+            setScanItems(merged);
+            // mark restored libraries as fully-scanned (server-provided snapshots)
+            try {
+              for (const k of Object.keys(merged)) {
+                libraryMetaRef.current[k] = { ...(libraryMetaRef.current[k] || {}), scannedComplete: true };
+              }
+            } catch (e) {}
+          }
         } else {
           // server returned non-OK; fallback to sessionStorage
           try {
@@ -813,7 +821,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   setScanningLib(lib.id);
   setScanningMap(m => ({ ...m, [lib.id]: true }));
   // hide items until scan completes
-  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: true };
+  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: true, scannedComplete: false };
   setScanItems(s => ({ ...s, [lib.id]: [] }));
     setScanOffset(0);
     setScanLoading(true);
@@ -908,7 +916,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
       } else {
         libraryMetaRef.current[lib.id] = { large: false, total: totalReported, nextOffset: data.nextOffset ?? items.length };
       }
-  // clear progress
+  // mark this library as fully scanned and clear progress
+  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), scannedComplete: true, bgRunning: !!libraryMetaRef.current[lib.id]?.bgRunning };
   setScanProgress(p => { const c = { ...p }; delete c[lib.id]; return c; });
   try { persistScanState(lib.id); } catch (e) {}
       // If the library is large, skip eager auto-preview to avoid hammering the client/network.
@@ -977,9 +986,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
       setScanItems(s => {
         const cur = s[lib.id] || [];
         const meta = libraryMetaRef.current[lib.id] || {} as any;
-        // If full-scan hide flag is set or a background scan is still running,
-        // avoid revealing partial items until the scan completes
-        if (meta.hideWhileScanning || meta.bgRunning) return s;
+  // If full-scan hide flag is set, a background scan is still running,
+  // or the library hasn't been fully scanned, avoid revealing partial items until the scan completes
+  if (meta.hideWhileScanning || meta.bgRunning || !meta.scannedComplete) return s;
         const merged = [...cur, ...(data.items || [])];
         if (meta.large) return { ...s, [lib.id]: merged.slice(0, INITIAL_WINDOW) };
         return { ...s, [lib.id]: merged };
@@ -1541,8 +1550,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
         <div className="mt-3 space-y-2">
           {scanningAll ? (
             <div className="text-sm text-muted">Scanning all libraries… results will appear when complete.</div>
-          ) : libraryMetaRef.current[lib.id]?.hideWhileScanning ? (
-            <div className="text-sm text-muted">Scanning library… results will appear when complete.</div>
+          ) : (libraryMetaRef.current[lib.id]?.hideWhileScanning || !libraryMetaRef.current[lib.id]?.scannedComplete) ? (
+            <div className="text-sm text-muted">Waiting for full library scan to complete… results will appear when complete.</div>
           ) : itemsToShow.length === 0 ? (
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
