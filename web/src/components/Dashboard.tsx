@@ -865,10 +865,20 @@ export default function Dashboard({ buttons }: DashboardProps) {
     } finally {
       // Persist discovered scanned updates to server cache and sessionStorage
       try {
-        const items = Array.from(scannedUpdatesRef.current.values() || []);
-        if (items.length) {
+        // Build a libId-keyed payload from scannedUpdates so server stores entries
+        // under the proper library id instead of a generic 'items' key.
+        const updates = Array.from(scannedUpdatesRef.current.values() || []);
+        if (updates.length) {
+          const payload: Record<string, any[]> = {};
+          for (const u of updates) {
+            try {
+              const libId = String(u?.libraryId || u?.libId || u?.library || '__unassigned');
+              payload[libId] = payload[libId] || [];
+              payload[libId].push(u);
+            } catch (e) { /* ignore per-item */ }
+          }
           try {
-            await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+            await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
             setBulkSaved(true);
           } catch (e) { /* ignore network persist failure */ }
         }
