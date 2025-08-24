@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
-import { FixedSizeList as List } from 'react-window';
+import { VariableSizeList as List } from 'react-window';
 import debug from '../lib/debug';
 
 type Library = {
@@ -1520,54 +1520,78 @@ export default function ScanManager({ buttons }: DashboardProps) {
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
             (() => {
-              const rowHeight = 160; // rough per-item height including margins (increased to avoid clipped buttons/inputs)
+              // Variable-size virtualization support: measure per-row height
+              const sizeMapRef = useRef<Record<number, number>>({});
+              const listRef = useRef<any>(null as any);
+              const getSize = (index: number) => sizeMapRef.current[index] || 120;
+              const setSize = (index: number, size: number) => {
+                if (sizeMapRef.current[index] !== size) {
+                  sizeMapRef.current[index] = size;
+                  try { listRef.current?.resetAfterIndex(index); } catch (e) {}
+                }
+              };
+
               const itemCount = itemsToShow.length;
               const Row = ({ index, style }: { index: number; style: any }) => {
                 const item = itemsToShow[index];
                 const mapKey = `${lib.id}::${item.id}`;
                 const hydrated = !!hydratedMap[mapKey];
+                const elRef = useRef<HTMLDivElement | null>(null);
+                // measure after render
+                useEffect(() => {
+                  const el = elRef.current;
+                  if (!el) return;
+                  const measure = () => setSize(index, Math.ceil(el.getBoundingClientRect().height));
+                  measure();
+                  // fallback resize observer where available
+                  let ro: ResizeObserver | null = null;
+                  try {
+                    if ((window as any).ResizeObserver) {
+                      ro = new (window as any).ResizeObserver(() => measure());
+                      if (ro && el) ro.observe(el);
+                    }
+                  } catch (e) {}
+                  return () => { try { if (ro) ro.disconnect(); } catch {} };
+                }, [index]);
+
+                // If the library is hidden during scan, render a compact placeholder
+                if (libraryMetaRef.current[lib.id] && libraryMetaRef.current[lib.id].hideWhileScanning) {
+                  return (
+                    <div style={style} key={item.id}>
+                      <div ref={elRef} className="p-2 text-sm text-muted">Scanning… results will appear when the scan completes.</div>
+                    </div>
+                  );
+                }
+
                 return (
                   <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
-                    {!hydrated ? (
-                      <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 96, marginBottom: 8 }}>
+                    <div ref={elRef} className="p-2" style={{ marginBottom: 6 }}>
+                      {!hydrated ? (
                         <div className="font-mono text-sm break-all">{item.path}</div>
-                      </div>
-                    ) : (
-                      <div className="card p-3 border rounded-2xl shadow-sm bg-card/60 flex items-center justify-between gap-3" style={{ minHeight: 96, marginBottom: 8 }}>
-                        <div className="flex items-start gap-3 flex-1">
-                          <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
+                      ) : (
+                        // compact inline layout
+                        <div className="flex items-center gap-3">
+                          <div className="text-xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
                           <div className="flex-1">
-                            <div className="font-mono text-base break-all">{item.path}</div>
-                            <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
-                            {fetchingEpisodeMap[item.id] && <div className="text-sm text-muted mt-1">Fetching episode title…</div>}
-                          </div>
-                        </div>
-                        <div className="flex flex-col gap-2 items-end">
-                          <div className="flex gap-2">
-                            <button className={buttons.base} onClick={() => rescanItem(lib, item)} aria-label="Rescan">🔄 Rescan</button>
-                            <button className={buttons.base} onClick={() => autoPreview(lib, item)} aria-label="Auto preview">🤖 Auto</button>
-                            <button className={buttons.base} onClick={() => searchTVDBFor(item)} aria-label="Search TVDB">🔍 Find</button>
-                            <button className={buttons.base} onClick={() => fetchEpisodeTitleIfNeededClient(lib, item)} aria-label="Fetch episode title">📥 Fetch</button>
+                            <div className="font-mono text-sm break-all">{item.path}</div>
+                            <div className="text-xs text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
                           </div>
                           <div className="flex items-center gap-2">
-                            <input className="input text-sm" style={{ width: 140 }} placeholder="TVDB ID" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
-                            <select className="select text-sm" value={tvdbInputs[item.id]?.type ?? (item.inferred?.kind ?? 'series')} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{}), type: e.target.value as any } }))}>
-                              <option value="series">Series</option>
-                              <option value="movie">Movie</option>
-                            </select>
-                          </div>
-                          <div className="flex gap-2">
-                            <button className={buttons.base} onClick={() => approveItem(lib, item)} aria-label="Approve">✅ Approve</button>
-                            <button className={buttons.base} onClick={() => loadMore(lib)} aria-label="More">⋯ More</button>
+                            <button className={buttons.base} onClick={() => rescanItem(lib, item)}>🔄</button>
+                            <button className={buttons.base} onClick={() => autoPreview(lib, item)}>🤖</button>
+                            <button className={buttons.base} onClick={() => searchTVDBFor(item)}>🔍</button>
+                            <input className="input text-sm" style={{ width: 110 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
+                            <button className={buttons.base} onClick={() => approveItem(lib, item)}>✅</button>
                           </div>
                         </div>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 );
               };
+
               return (
-                <List height={Math.min(1200, itemCount * rowHeight)} itemCount={itemCount} itemSize={rowHeight} width={'100%'}>
+                <List ref={listRef} height={Math.min(1200, itemCount * 120)} itemCount={itemCount} itemSize={getSize} width={'100%'}>
                   {Row}
                 </List>
               );
