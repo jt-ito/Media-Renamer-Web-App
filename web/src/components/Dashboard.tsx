@@ -20,6 +20,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   const [scanItems, setScanItems] = useState<Record<string, any[]>>({});
   const [scanLoading, setScanLoading] = useState(false);
   const [scanOffset, setScanOffset] = useState(0);
+  const [scanProgress, setScanProgress] = useState<Record<string, { total: number; done: number; start: number }>>({});
   const [openLibPanels, setOpenLibPanels] = useState<Record<string, boolean>>({});
   const [searchResults, setSearchResults] = useState<Record<string, any[]>>({});
   const [previewPlans, setPreviewPlans] = useState<Record<string, any[]>>({});
@@ -648,6 +649,7 @@ export default function Dashboard({ buttons }: DashboardProps) {
   async function scanLibrary(lib: Library) {
   setScanningLib(lib.id);
   setScanningMap(m => ({ ...m, [lib.id]: true }));
+    // hide items until scan completes
     setScanItems(s => ({ ...s, [lib.id]: [] }));
     setScanOffset(0);
     setScanLoading(true);
@@ -663,45 +665,74 @@ export default function Dashboard({ buttons }: DashboardProps) {
       // If server reports a very large library, only keep a small initial window
       // in client state and mark the library for background scanning.
       const totalReported = data.total ?? (items.length || 0);
+      // initialize progress and mark background running
+      setScanProgress(p => ({ ...p, [lib.id]: { total: totalReported, done: 0, start: Date.now() } }));
+      libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), bgRunning: true };
+      // Stream pages and process items silently. We will reveal results when finished.
+      const CONCURRENCY = 5;
+      const PAGE_LIMIT = PREFETCH_BATCH_SIZE;
+      let accumulatedItems: any[] = [];
+      // process a single page of items with concurrency
+      const processPage = async (pageItems: any[]) => {
+        // abort early if user cancelled
+        if (!libraryMetaRef.current[lib.id] || !libraryMetaRef.current[lib.id].bgRunning) return;
+        accumulatedItems = accumulatedItems.concat(pageItems);
+        let idx = 0;
+        const pool: Promise<void>[] = [];
+        const startTime = Date.now();
+        const spawn = () => {
+          while (pool.length < CONCURRENCY && idx < pageItems.length) {
+            const it = pageItems[idx++];
+            // check for cancellation between tasks
+            if (!libraryMetaRef.current[lib.id] || !libraryMetaRef.current[lib.id].bgRunning) break;
+            const p = (async () => {
+              try {
+                await fetchEpisodeTitleIfNeeded(lib, it, { silent: true });
+              } catch (e) {}
+              // update progress
+              setScanProgress(p => {
+                try {
+                  const prev = p[lib.id] || { total: totalReported, done: 0, start: Date.now() };
+                  return { ...p, [lib.id]: { ...prev, done: prev.done + 1 } };
+                } catch (e) { return p; }
+              });
+            })();
+            // remove from pool when done
+            pool.push(p.then(() => { const i = pool.indexOf(p); if (i >= 0) pool.splice(i, 1); }));
+          }
+        };
+        spawn();
+        // wait until all spawned tasks finish
+        await Promise.all(pool);
+      };
+
+      // include first page immediately
+      let nextOffset = data.nextOffset ?? (items.length || 0);
+      // process first page
+      await processPage(items);
+      // fetch remaining pages sequentially and process
+      while (nextOffset != null && nextOffset < (totalReported || Infinity)) {
+        // respect cancellation
+        if (!libraryMetaRef.current[lib.id] || !libraryMetaRef.current[lib.id].bgRunning) break;
+        try {
+          const pageRes = await fetch(`/api/scan?offset=${nextOffset}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ libraryId: lib.id, limit: PAGE_LIMIT }) });
+          if (!pageRes.ok) break;
+          const pageJs = await pageRes.json();
+          const pageItems = pageJs.items || [];
+          await processPage(pageItems);
+          nextOffset = pageJs.nextOffset ?? (nextOffset + (pageItems.length || 0));
+        } catch (e) { break; }
+      }
+      // scanning finished: reveal items (accumulated) and persist
+      setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
       if (totalReported > LARGE_LIBRARY_THRESHOLD) {
         libraryMetaRef.current[lib.id] = { large: true, total: totalReported, nextOffset: data.nextOffset ?? items.length };
-        setScanItems(s => ({ ...s, [lib.id]: (items || []).slice(0, INITIAL_WINDOW) }));
+        // keep metadata; items already set after full scan
       } else {
         libraryMetaRef.current[lib.id] = { large: false, total: totalReported, nextOffset: data.nextOffset ?? items.length };
-        setScanItems(s => ({ ...s, [lib.id]: items }));
       }
-      // Kick off a short initial prefetch so the first items are scanned quickly.
-      // This helps when libraries are large and AUTO_PREVIEW_LIMIT prevents eager processing.
-      (async () => {
-        // PREFETCH_COUNT and PREFETCH_TIMEOUT_MS are defined higher up for tuning
-        try {
-          setInitialPrefetchingMap(m => ({ ...m, [lib.id]: true }));
-          const start = Date.now();
-          // Concurrent prefetch with small concurrency to hide latency without blocking UI
-          const CONCURRENCY = 5;
-          // Use the client window of items to avoid iterating a huge server-returned array
-          const clientItems = (scanItemsRef.current || {})[lib.id] || [];
-          const toPrefetch = Math.min(PREFETCH_COUNT, clientItems.length);
-          let idx = 0;
-          const workerFn = async () => {
-            while (true) {
-              const i = idx++;
-              if (i >= toPrefetch) return;
-              if (Date.now() - start > PREFETCH_TIMEOUT_MS) return;
-              try {
-                const it = clientItems[i];
-                const p = it?.path ? normalizePath(it.path) : null;
-                if (p && (scannedPathsRef.current.has(p) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(p)))) continue;
-                // mark silent to avoid UI indicators and reduce re-renders
-                await fetchEpisodeTitleIfNeeded(lib, it, { silent: true });
-              } catch (e) { /* continue */ }
-            }
-          };
-          await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toPrefetch) }).map(() => workerFn()));
-        } finally {
-          setInitialPrefetchingMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
-        }
-      })();
+      // clear progress
+      setScanProgress(p => { const c = { ...p }; delete c[lib.id]; return c; });
       // If the library is large, skip eager auto-preview to avoid hammering the client/network.
       const AUTO_PREVIEW_LIMIT = 30;
       try {
@@ -726,8 +757,22 @@ export default function Dashboard({ buttons }: DashboardProps) {
     } catch (e: any) {
       setError(e?.message ?? 'Scan failed');
     } finally {
-  setScanLoading(false);
-  setScanningMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
+      // Persist discovered scanned updates to server cache and sessionStorage
+      try {
+        const items = Array.from(scannedUpdatesRef.current.values() || []);
+        if (items.length) {
+          try {
+            await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+            setBulkSaved(true);
+          } catch (e) { /* ignore network persist failure */ }
+        }
+      } catch (e) { /* ignore */ }
+      try {
+        const paths = Array.from(scannedPathsRef.current || []);
+        sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(paths));
+      } catch (e) { /* ignore sessionStorage errors */ }
+      setScanLoading(false);
+      setScanningMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
     }
   }
 
@@ -1256,6 +1301,32 @@ export default function Dashboard({ buttons }: DashboardProps) {
           </div>
           <div>
             <button className={buttons.base} onClick={() => scanLibrary(lib)} disabled={!!scanningMap[lib.id]}>Scan</button>
+            {/* Show scanning overlay/progress when a full scan is running */}
+            {scanProgress[lib.id] && (
+              (() => {
+                const p = scanProgress[lib.id];
+                const done = p.done || 0;
+                const total = p.total || 0;
+                const elapsed = Math.max(1, Date.now() - p.start);
+                const rate = done / (elapsed / 1000); // items/sec
+                const remaining = Math.max(0, total - done);
+                const etaSec = rate > 0 ? Math.round(remaining / rate) : null;
+                return (
+                  <div className="inline-block ml-4 p-2 bg-card/80 rounded shadow-sm text-sm">
+                    <div>Scanning: {done}/{total}</div>
+                    <div className="text-xs text-muted">{etaSec !== null ? `ETA ${Math.round(etaSec)}s` : 'Estimating…'}</div>
+                    <div className="mt-2">
+                      <button className={buttons.base + ' mr-2'} onClick={() => {
+                        // cancel scanning for this lib: clear progress and stop background metadata
+                        setScanProgress(s => { const c = { ...s }; delete c[lib.id]; return c; });
+                        libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), bgRunning: false };
+                        setScanningMap(m => ({ ...m, [lib.id]: false }));
+                      }}>Cancel</button>
+                    </div>
+                  </div>
+                );
+              })()
+            )}
             {initialPrefetchingMap[lib.id] && <span className="ml-2 text-sm text-muted">Prefetching…</span>}
             {previewSkippedMap[lib.id] && (
               <button className={buttons.base} onClick={() => previewAllThrottled(lib)} disabled={!!previewingMap[lib.id]}>Preview all (throttled)</button>
@@ -1275,49 +1346,59 @@ export default function Dashboard({ buttons }: DashboardProps) {
           {itemsToShow.length === 0 ? (
             <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>
           ) : (
-            itemsToShow.map(item => {
-              const mapKey = `${lib.id}::${item.id}`;
-              const hydrated = !!hydratedMap[mapKey];
+            (() => {
+              const rowHeight = 80; // rough per-item height including margins
+              const itemCount = itemsToShow.length;
+              const Row = ({ index, style }: { index: number; style: any }) => {
+                const item = itemsToShow[index];
+                const mapKey = `${lib.id}::${item.id}`;
+                const hydrated = !!hydratedMap[mapKey];
+                return (
+                  <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
+                    {!hydrated ? (
+                      <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 56, marginBottom: 8 }}>
+                        <div className="font-mono text-sm break-all">{item.path}</div>
+                      </div>
+                    ) : (
+                      <div className="card p-3 border rounded-2xl shadow-sm bg-card/60 flex items-center justify-between gap-3" style={{ minHeight: 56, marginBottom: 8 }}>
+                        <div className="flex items-start gap-3 flex-1">
+                          <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
+                          <div className="flex-1">
+                            <div className="font-mono text-base break-all">{item.path}</div>
+                            <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
+                            {fetchingEpisodeMap[item.id] && <div className="text-sm text-muted mt-1">Fetching episode title…</div>}
+                          </div>
+                        </div>
+                        <div className="flex flex-col gap-2 items-end">
+                          <div className="flex gap-2">
+                            <button className={buttons.base} onClick={() => rescanItem(lib, item)} aria-label="Rescan">🔄 Rescan</button>
+                            <button className={buttons.base} onClick={() => autoPreview(lib, item)} aria-label="Auto preview">🤖 Auto</button>
+                            <button className={buttons.base} onClick={() => searchTVDBFor(item)} aria-label="Search TVDB">🔍 Find</button>
+                            <button className={buttons.base} onClick={() => fetchEpisodeTitleIfNeeded(lib, item)} aria-label="Fetch episode title">📥 Fetch</button>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input className="input text-sm" style={{ width: 140 }} placeholder="TVDB ID" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
+                            <select className="select text-sm" value={tvdbInputs[item.id]?.type ?? (item.inferred?.kind ?? 'series')} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{}), type: e.target.value as any } }))}>
+                              <option value="series">Series</option>
+                              <option value="movie">Movie</option>
+                            </select>
+                          </div>
+                          <div className="flex gap-2">
+                            <button className={buttons.base} onClick={() => approveItem(lib, item)} aria-label="Approve">✅ Approve</button>
+                            <button className={buttons.base} onClick={() => loadMore(lib)} aria-label="More">⋯ More</button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              };
               return (
-                <div key={item.id} data-item-id={item.id} data-lib-id={lib.id} style={{ position: 'relative' }}>
-                  {!hydrated ? (
-                    <div className="p-3 rounded-2xl bg-card/10" style={{ minHeight: 56, marginBottom: 8 }}>
-                      <div className="font-mono text-sm break-all">{item.path}</div>
-                    </div>
-                  ) : (
-                    <div className="card p-3 border rounded-2xl shadow-sm bg-card/60 flex items-center justify-between gap-3" style={{ minHeight: 56, marginBottom: 8 }}>
-                      <div className="flex items-start gap-3 flex-1">
-                        <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
-                        <div className="flex-1">
-                          <div className="font-mono text-base break-all">{item.path}</div>
-                          <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
-                          {fetchingEpisodeMap[item.id] && <div className="text-sm text-muted mt-1">Fetching episode title…</div>}
-                        </div>
-                      </div>
-                      <div className="flex flex-col gap-2 items-end">
-                        <div className="flex gap-2">
-                          <button className={buttons.base} onClick={() => rescanItem(lib, item)} aria-label="Rescan">🔄 Rescan</button>
-                          <button className={buttons.base} onClick={() => autoPreview(lib, item)} aria-label="Auto preview">🤖 Auto</button>
-                          <button className={buttons.base} onClick={() => searchTVDBFor(item)} aria-label="Search TVDB">🔍 Find</button>
-                          <button className={buttons.base} onClick={() => fetchEpisodeTitleIfNeeded(lib, item)} aria-label="Fetch episode title">📥 Fetch</button>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <input className="input text-sm" style={{ width: 140 }} placeholder="TVDB ID" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
-                          <select className="select text-sm" value={tvdbInputs[item.id]?.type ?? (item.inferred?.kind ?? 'series')} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{}), type: e.target.value as any } }))}>
-                            <option value="series">Series</option>
-                            <option value="movie">Movie</option>
-                          </select>
-                        </div>
-                        <div className="flex gap-2">
-                          <button className={buttons.base} onClick={() => approveItem(lib, item)} aria-label="Approve">✅ Approve</button>
-                          <button className={buttons.base} onClick={() => loadMore(lib)} aria-label="More">⋯ More</button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <List height={Math.min(600, itemCount * 80)} itemCount={itemCount} itemSize={rowHeight} width={'100%'}>
+                  {Row}
+                </List>
               );
-            })
+            })()
           )}
         </div>
       </div>
