@@ -665,15 +665,25 @@ export default function Dashboard({ buttons }: DashboardProps) {
         try {
           setInitialPrefetchingMap(m => ({ ...m, [lib.id]: true }));
           const start = Date.now();
-          for (let i = 0; i < Math.min(PREFETCH_COUNT, items.length); i++) {
-            if (Date.now() - start > PREFETCH_TIMEOUT_MS) break;
-            try {
-              const it = items[i];
-              const p = it?.path ? normalizePath(it.path) : null;
-              if (p && (scannedPathsRef.current.has(p) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(p)))) continue;
-              await fetchEpisodeTitleIfNeeded(lib, items[i]);
-            } catch (e) { /* continue */ }
-          }
+          // Concurrent prefetch with small concurrency to hide latency without blocking UI
+          const CONCURRENCY = 2;
+          const toPrefetch = Math.min(PREFETCH_COUNT, items.length);
+          let idx = 0;
+          const workerFn = async () => {
+            while (true) {
+              const i = idx++;
+              if (i >= toPrefetch) return;
+              if (Date.now() - start > PREFETCH_TIMEOUT_MS) return;
+              try {
+                const it = items[i];
+                const p = it?.path ? normalizePath(it.path) : null;
+                if (p && (scannedPathsRef.current.has(p) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(p)))) continue;
+                // mark silent to avoid UI indicators and reduce re-renders
+                await fetchEpisodeTitleIfNeeded(lib, items[i], { silent: true });
+              } catch (e) { /* continue */ }
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toPrefetch) }).map(() => workerFn()));
         } finally {
           setInitialPrefetchingMap(m => { const c = { ...m }; delete c[lib.id]; return c; });
         }
