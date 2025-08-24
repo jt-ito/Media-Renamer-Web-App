@@ -138,6 +138,17 @@ export default function Dashboard({ buttons }: DashboardProps) {
     } catch (e) {}
   }, []);
 
+  // Persist a specific library's items immediately (useful right after computing accumulatedItems)
+  const persistScanItemsNow = useCallback((libId: string, items: any[]) => {
+    try {
+      const cur = scanItemsRef.current || {};
+      const merged = { ...cur, [libId]: items };
+      // update the ref so later uses see the new items immediately
+      try { scanItemsRef.current = merged; } catch (e) {}
+      try { sessionStorage.setItem('dashboard.scanItems', JSON.stringify(merged)); } catch (e) {}
+    } catch (e) {}
+  }, []);
+
   // expose a simple background scan manager on window so scans survive Dashboard unmounts
   useEffect(() => {
     try {
@@ -814,8 +825,10 @@ export default function Dashboard({ buttons }: DashboardProps) {
           nextOffset = pageJs.nextOffset ?? (nextOffset + (pageItems.length || 0));
         } catch (e) { break; }
       }
-      // scanning finished: reveal items (accumulated) and persist
-      setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
+  // scanning finished: reveal items (accumulated) and persist
+  // update ref and sessionStorage immediately so navigating away and back restores items
+  try { persistScanItemsNow(lib.id, accumulatedItems); } catch (e) {}
+  setScanItems(s => ({ ...s, [lib.id]: accumulatedItems }));
   try { persistScanState(lib.id); } catch (e) {}
       if (totalReported > LARGE_LIBRARY_THRESHOLD) {
         libraryMetaRef.current[lib.id] = { large: true, total: totalReported, nextOffset: data.nextOffset ?? items.length };
