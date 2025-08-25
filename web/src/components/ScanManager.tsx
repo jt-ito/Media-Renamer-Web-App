@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
-import { VariableSizeList as List } from 'react-window';
+import { FixedSizeList as List } from 'react-window';
 import debug from '../lib/debug';
 
 type Library = {
@@ -181,7 +181,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   useEffect(() => { scanningAllRef.current = scanningAll; }, [scanningAll]);
   // incremental reveal settings: show a small initial slice after a full scan
   const INITIAL_VISIBLE_COUNT = 12; // number of items to show immediately when a scan completes
-  const VISIBLE_BATCH_SIZE = 6; // how many to append per subsequent batch
+  const VISIBLE_BATCH_SIZE = 12; // how many to append per subsequent batch
   const appendInProgressRef = useRef<Record<string, boolean>>({});
   const userScrolledRef = useRef<Record<string, boolean>>({});
   const appendCursorRef = useRef<Record<string, number>>({});
@@ -262,7 +262,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const PREFETCH_TIMEOUT_MS = 8000;
   // treat very large libraries specially to avoid loading many items into memory/DOM
   const LARGE_LIBRARY_THRESHOLD = 2000; // library size above which we consider it "large"
-  const INITIAL_WINDOW = 200; // initial number of items to keep in client state for large libs
+  // Keep initial client-state window equal to the visible count so we never
+  // unintentionally reveal large slices (was 200 before; reduced to 12)
+  const INITIAL_WINDOW = INITIAL_VISIBLE_COUNT; // initial number of items to keep in client state for large libs
   const PREFETCH_BATCH_SIZE = 200; // background batch size when scanning large libs
   const IDLE_BATCH_DELAY_MS = 400; // delay between background batches to avoid hogging
   // per-library virtualization state (size map + list ref) kept in a top-level ref
@@ -1093,8 +1095,10 @@ export default function ScanManager({ buttons }: DashboardProps) {
   } catch (e) {}
   setScanningLib(lib.id);
   setScanningMap(m => ({ ...m, [lib.id]: true }));
-  // mark scanning state; only hide/clear UI when this was a user-requested reveal
-  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: revealRequested, scannedComplete: false };
+  // mark scanning state; always hide UI while scanning so we don't reveal
+  // partial results. We'll reveal a safe initial slice only after the
+  // full library scan completes.
+  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: true, scannedComplete: false };
   if (revealRequested || openLibPanels[lib.id]) updateScanItems(lib.id, [], 'scanLibrary:start:clearItems');
     setScanOffset(0);
     setScanLoading(true);
@@ -1472,7 +1476,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
     if (!ej) return;
     const title = ej.title || null;
   if (title) {
-        // merge back into item inferred
+            // merge back into item inferred
         const newInferred = { ...inf, episode_title: title };
         // update parsedName if desired
         const paddedS = String(season).padStart(2, '0');
@@ -1481,7 +1485,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
         newInferred.parsedName = `${base} - S${paddedS}E${paddedE} - ${title}`;
         newInferred.jellyfinExample = `${base}/Season ${paddedS}/${base} - S${paddedS}E${paddedE} - ${title}`;
         // write back — defer applying UI updates if item is currently visible to avoid flicker
-        const updatedItem = { ...item, inferred: newInferred };
+  const updatedItem = { ...item, inferred: newInferred };
         const globalKey = `${lib.id}::${key}`;
         const normPath = item?.path ? normalizePath(item.path) : null;
         if (silent) {
@@ -1498,8 +1502,10 @@ export default function ScanManager({ buttons }: DashboardProps) {
             // keep in-memory pending update; will be applied when item leaves view
             pendingUpdatesRef.current.set(globalKey, updatedItem);
             if (normPath) {
-              scannedUpdatesRef.current.set(normPath, updatedItem);
-              scannedPathsRef.current.add(normPath);
+              // Also persist any discovered TVDB input into the scannedUpdates so
+              // future scans skip TVDB API calls for this path.
+              try { scannedUpdatesRef.current.set(normPath, updatedItem); } catch (e) {}
+              try { scannedPathsRef.current.add(normPath); } catch (e) {}
               try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
               try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current))); } catch {}
               try { persistScannedUpdatesToServer().catch(()=>{}); } catch(e){}
@@ -1868,83 +1874,28 @@ export default function ScanManager({ buttons }: DashboardProps) {
             if (shouldHide) return <div className="text-sm text-muted">Waiting for full library scan to complete… results will appear when complete.</div>;
             if (itemsToShow.length === 0) return <div className="text-sm text-muted">No scanned items{q ? ' match your search' : ''}.</div>;
 
-            // Use a top-level per-library virtualization state to avoid hooks inside render
-            const vsKey = String(lib.id);
-            if (!virtualListStateRef.current[vsKey]) {
-              virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
-            }
-            const vstate = virtualListStateRef.current[vsKey];
-            const ITEM_DEFAULT_HEIGHT = 285; // reduced to ~2/3 of previous so boxes shrink by ~1/3
-            const getSize = (index: number) => vstate.sizeMap[index] || ITEM_DEFAULT_HEIGHT;
-            const setSize = (index: number, size: number) => {
-              try {
-                // Normalize size to integer and ignore tiny fluctuations
-                const normalized = Math.ceil(size || 0);
-                const prev = vstate.sizeMap[index] || 0;
-                // Ignore small fluctuations to avoid frequent react-window resets
-                // which cause hover/focus jitter. Increase tolerance from 2px to 6px.
-                if (Math.abs(prev - normalized) <= 6) return;
-                vstate.sizeMap[index] = normalized;
-                // Use the `forceUpdate` flag as false to let react-window batch
-                // internal changes and avoid triggering an immediate heavy reflow.
-                try { vstate.listRef.current?.resetAfterIndex(index, false); } catch (e) {}
-              } catch (e) { /* ignore measurement errors */ }
-            };
-
+            // Simpler, fixed-height virtualization to avoid frequent layout
+            // recalculations that caused button hover/click jitter. Use a
+            // modest fixed height and a FixedSizeList for stable behavior.
+            const ITEM_HEIGHT = 220; // compact card height
             const itemCount = itemsToShow.length;
+
             const Row = ({ index, style }: { index: number; style: any }) => {
               const item = itemsToShow[index];
               const mapKey = `${lib.id}::${item.id}`;
               const hydrated = !!hydratedMap[mapKey];
-              // ref callback to measure element height without hooks (react-window render-prop)
-              // Debounce ResizeObserver notifications to avoid frequent calls which
-              // cause react-window to reset rows and produce hover/click jitter.
-              const refCallback = (el: HTMLDivElement | null) => {
-                try {
-                  // Clear previous observer and timer if present
-                  try {
-                    const prev = (el as any)?.__mr_ro;
-                    if (prev) try { prev.disconnect(); } catch {}
-                  } catch {}
-
-                  if (el === null) return;
-
-                  const measure = () => {
-                    try { setSize(index, Math.ceil(el.getBoundingClientRect().height)); } catch (e) {}
-                  };
-
-                  // Initial immediate measurement
-                  measure();
-
-                  try {
-                    if ((window as any).ResizeObserver) {
-                      const ro = new (window as any).ResizeObserver(() => {
-                        try {
-                          // debounce per-element using a timer stored on the DOM node
-                          try { clearTimeout((el as any).__mr_to); } catch {}
-                          // increase debounce to 300ms to batch rapid layout fluctuations
-                          // and reduce resetAfterIndex calls which cause UI jitter.
-                          (el as any).__mr_to = setTimeout(() => measure(), 300);
-                        } catch (e) { /* ignore RO callback errors */ }
-                      });
-                      (el as any).__mr_ro = ro;
-                      ro.observe(el);
-                    }
-                  } catch (e) { /* ignore RO errors */ }
-                } catch (e) { /* ignore measure errors */ }
-              };
 
               if (libraryMetaRef.current[lib.id] && libraryMetaRef.current[lib.id].hideWhileScanning) {
                 return (
                   <div style={style} key={item.id}>
-                    <div ref={refCallback} className="p-2 text-sm text-muted">Scanning… results will appear when the scan completes.</div>
+                    <div className="p-2 text-sm text-muted">Scanning… results will appear when the scan completes.</div>
                   </div>
                 );
               }
 
               return (
                 <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
-                  <div ref={refCallback} className="scan-item" style={{ minHeight: ITEM_DEFAULT_HEIGHT - 24 }}>
+                  <div className="scan-item" style={{ height: ITEM_HEIGHT - 8, padding: 8 }}>
                     {!hydrated ? (
                       <div className="font-mono break-all">{item.path}</div>
                     ) : (
@@ -1970,30 +1921,24 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
             return (
               <List
-                ref={(vstate.listRef as any)}
-                height={Math.min(1200, itemCount * ITEM_DEFAULT_HEIGHT, 3 * ITEM_DEFAULT_HEIGHT)}
+                height={Math.min(1200, itemCount * ITEM_HEIGHT, 3 * ITEM_HEIGHT)}
                 itemCount={itemCount}
-                itemSize={getSize}
+                itemSize={ITEM_HEIGHT}
                 width={'100%'}
                 onItemsRendered={({ visibleStopIndex }) => {
                   try {
-                    // If completed results exist for this lib and the visibleStopIndex
-                    // is near the end of currently visible items, append the next batch.
                     const libId = lib.id;
                     const full = completedScanResultsRef.current[libId];
                     if (!full || !full.length) return;
                     const cur = (scanItemsRef.current || {})[libId] || [];
-                    // Only append when the user has actually scrolled to that point.
                     if (!userScrolledRef.current[libId]) return;
-                    // trigger when the user scrolls past 5 items from the end of current visible list
-                    if (visibleStopIndex >= (cur.length - 5)) {
+                    // trigger append earlier when user approaches the end
+                    if (visibleStopIndex >= (cur.length - 3)) {
                       void appendVisibleItems(libId);
                     }
                   } catch (e) {}
                 }}
-                onScroll={(props) => {
-                  try { userScrolledRef.current[lib.id] = true; } catch (e) {}
-                }}>
+                onScroll={() => { try { userScrolledRef.current[lib.id] = true; } catch (e) {} }}>
                 {Row}
               </List>
             );

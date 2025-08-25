@@ -1054,6 +1054,35 @@ async function bootstrap() {
         try {
           await fs.promises.writeFile(tmp, JSON.stringify(existing || {}, null, 2), 'utf8');
           await fs.promises.rename(tmp, SCAN_CACHE_PATH);
+          // After successfully writing the merged scan-cache, also write a
+          // per-path JSON file for each scanned item that includes the
+          // discovered TVDB id and the renamed name. This helps clients
+          // persist per-path metadata as separate files for external use.
+          try {
+            const PER_PATH_DIR = process.env.SCAN_PER_PATH_DIR || path.resolve(__dirname, '..', 'config', 'scan-cache-files');
+            await fs.promises.mkdir(PER_PATH_DIR, { recursive: true });
+            const normalize = (p: string) => normalizePathForCache(String(p || ''));
+            for (const libId of Object.keys(existing || {})) {
+              const arr = existing[libId] || [];
+              if (!Array.isArray(arr)) continue;
+              for (const it of arr) {
+                try {
+                  const rawPath = it?.path || null;
+                  if (!rawPath) continue;
+                  const np = normalize(rawPath);
+                  // Attempt to detect TVDB id and a reasonable renamedName
+                  const tvdbId = (it && it.meta && (it.meta.tvdbId || it.meta.tvdbid)) || (it && it.tvdbId) || null;
+                  const renamedName = (it && it.meta && (it.meta.metadataTitle || it.meta.output || it.meta.to)) || (it && it.inferred && it.inferred.parsedName) || null;
+                  // Only write files when we have something meaningful
+                  if (!tvdbId && !renamedName) continue;
+                  const fname = crypto.createHash('sha1').update(np).digest('hex') + '.json';
+                  const out = { path: rawPath, tvdbId: tvdbId || null, renamedName: renamedName || null, libraryId: libId };
+                  const fp = path.join(PER_PATH_DIR, fname);
+                  try { await fs.promises.writeFile(fp, JSON.stringify(out, null, 2), 'utf8'); } catch (e) { /* best-effort */ }
+                } catch (e) { /* per-item best-effort */ }
+              }
+            }
+          } catch (e) { /* ignore per-path write errors */ }
         } catch (e) {
           // best-effort cleanup
           try { if (fs.existsSync(tmp)) await fs.promises.unlink(tmp); } catch (e2) {}
