@@ -130,6 +130,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const INITIAL_VISIBLE_COUNT = 12; // number of items to show immediately when a scan completes
   const VISIBLE_BATCH_SIZE = 6; // how many to append per subsequent batch
   const appendInProgressRef = useRef<Record<string, boolean>>({});
+  const userScrolledRef = useRef<Record<string, boolean>>({});
   const appendVisibleItems = useCallback(async (libId: string) => {
     try {
       const full = completedScanResultsRef.current[libId];
@@ -1805,11 +1806,16 @@ export default function ScanManager({ buttons }: DashboardProps) {
                     const full = completedScanResultsRef.current[libId];
                     if (!full || !full.length) return;
                     const cur = (scanItemsRef.current || {})[libId] || [];
+                    // Only append when the user has actually scrolled to that point.
+                    if (!userScrolledRef.current[libId]) return;
                     // trigger when the user scrolls past 5 items from the end of current visible list
                     if (visibleStopIndex >= (cur.length - 5)) {
                       void appendVisibleItems(libId);
                     }
                   } catch (e) {}
+                }}
+                onScroll={(props) => {
+                  try { userScrolledRef.current[lib.id] = true; } catch (e) {}
                 }}>
                 {Row}
               </List>
