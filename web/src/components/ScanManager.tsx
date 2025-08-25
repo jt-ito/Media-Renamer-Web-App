@@ -1081,13 +1081,33 @@ export default function ScanManager({ buttons }: DashboardProps) {
             if (!libraryMetaRef.current[lib.id] || !libraryMetaRef.current[lib.id].bgRunning) break;
             const p = (async () => {
               try {
-                // avoid re-fetching titles for items that have already been scanned
+                // Avoid re-fetching titles for items that have already been scanned
                 try {
                   const path = it?.path ? normalizePath(it.path) : null;
                   if (path && (scannedPathsRef.current.has(path) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(path)))) {
                     // already scanned — skip external lookup
                     return;
                   }
+                } catch (e) {}
+                // If inferred data is missing, skip enrichment (can't build dedupe key)
+                if (!it || !it.inferred) return;
+                try {
+                  const infLocal = it.inferred;
+                  const seriesNameLocal = infLocal.title || (infLocal.parsedName ? String(infLocal.parsedName).split(' - ')[0] : '');
+                  if (!seriesNameLocal) return;
+                  const seasonLocal = infLocal.season ?? 1;
+                  const epLocal = infLocal.episode_number ?? (infLocal.episodes && infLocal.episodes[0]) ?? (infLocal.absolute && infLocal.absolute[0]);
+                  if (epLocal == null) return;
+                  const dedupeKeyLocal = `series:${String(seriesNameLocal).toLowerCase()}::s:${seasonLocal}::e:${epLocal}`;
+                  // If we have a recent cached response for this episode, skip network work
+                  try {
+                    const cached = responseCacheRef.current.get(dedupeKeyLocal);
+                    if (cached && (Date.now() - (cached.ts || 0)) < RESPONSE_CACHE_TTL_MS) {
+                      // eslint-disable-next-line no-console
+                      console.debug('[ScanManager] processPage: skipping enrichment; cache hit', dedupeKeyLocal);
+                      return;
+                    }
+                  } catch (e) {}
                 } catch (e) {}
                 await fetchEpisodeTitleIfNeededClient(lib, it, { silent: true });
               } catch (e) {}
@@ -1868,7 +1888,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
               return (
                 <div style={style} key={item.id} data-item-id={item.id} data-lib-id={lib.id}>
-                  <div ref={refCallback} className="scan-item">
+                  <div ref={refCallback} className="scan-item" style={{ minHeight: ITEM_DEFAULT_HEIGHT - 24 }}>
                     {!hydrated ? (
                       <div className="font-mono break-all">{item.path}</div>
                     ) : (
