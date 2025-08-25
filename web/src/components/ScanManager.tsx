@@ -1874,7 +1874,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 // Normalize size to integer and ignore tiny fluctuations
                 const normalized = Math.ceil(size || 0);
                 const prev = vstate.sizeMap[index] || 0;
-                if (Math.abs(prev - normalized) <= 2) return;
+                // Ignore small fluctuations to avoid frequent react-window resets
+                // which cause hover/focus jitter. Increase tolerance from 2px to 6px.
+                if (Math.abs(prev - normalized) <= 6) return;
                 vstate.sizeMap[index] = normalized;
                 // Use the `forceUpdate` flag as false to let react-window batch
                 // internal changes and avoid triggering an immediate heavy reflow.
@@ -1913,7 +1915,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
                         try {
                           // debounce per-element using a timer stored on the DOM node
                           try { clearTimeout((el as any).__mr_to); } catch {}
-                          (el as any).__mr_to = setTimeout(() => measure(), 140);
+                          // increase debounce to 300ms to batch rapid layout fluctuations
+                          // and reduce resetAfterIndex calls which cause UI jitter.
+                          (el as any).__mr_to = setTimeout(() => measure(), 300);
                         } catch (e) { /* ignore RO callback errors */ }
                       });
                       (el as any).__mr_ro = ro;
