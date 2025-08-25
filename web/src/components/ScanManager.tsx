@@ -145,6 +145,21 @@ export default function ScanManager({ buttons }: DashboardProps) {
       appendInProgressRef.current[libId] = false;
     } catch (e) { try { appendInProgressRef.current[libId] = false; } catch (er) {} }
   }, [updateScanItems]);
+
+  // Ensure the first N items have been enriched (fetched titles) before revealing
+  const ensureEnrichedForInitial = useCallback(async (libObj: any, items: any[]) => {
+    try {
+      const slice = (items || []).slice(0, INITIAL_VISIBLE_COUNT);
+      const out: any[] = [];
+      for (const it of slice) {
+        try {
+          const updated = await fetchEpisodeTitleIfNeededClient(libObj, it, { silent: true });
+          out.push(updated || it);
+        } catch (e) { out.push(it); }
+      }
+      return out;
+    } catch (e) { return (items || []).slice(0, INITIAL_VISIBLE_COUNT); }
+  }, [fetchEpisodeTitleIfNeededClient]);
   // delay between queued fetches to keep within API limits (ms)
   const RATE_DELAY_MS = 1500; // ~40 requests/min
   const IDLE_THRESHOLD_MS = 60_000; // start idle scan after 60s of inactivity
@@ -547,7 +562,20 @@ export default function ScanManager({ buttons }: DashboardProps) {
                 }
               }
             } catch (e) {}
-            if (Object.keys(toApply).length) updateScanItemsMultiple(toApply, 'restore:server-cache:applied');
+            if (Object.keys(toApply).length) {
+              try {
+                // Enrich initial slices before revealing
+                const enrichedMap: Record<string, any[]> = {};
+                for (const k of Object.keys(toApply)) {
+                  try {
+                    const libObj = libraries.find((l: any) => l.id === k) as any;
+                    const enriched = await ensureEnrichedForInitial(libObj || { id: k }, toApply[k] || []);
+                    enrichedMap[k] = enriched;
+                  } catch (e) { enrichedMap[k] = (toApply[k] || []).slice(0, INITIAL_VISIBLE_COUNT); }
+                }
+                updateScanItemsMultiple(enrichedMap, 'restore:server-cache:applied');
+              } catch (e) { updateScanItemsMultiple(toApply, 'restore:server-cache:applied'); }
+            }
           }
         } else {
           // server returned non-OK; fallback to sessionStorage
@@ -1011,7 +1039,10 @@ export default function ScanManager({ buttons }: DashboardProps) {
   if (!scanningAll && (revealRequested || openLibPanels[lib.id])) {
     // reveal a small initial window immediately, keep the rest stashed for append-on-scroll
     const initial = Array.isArray(accumulatedItems) ? accumulatedItems.slice(0, INITIAL_VISIBLE_COUNT) : [];
-    updateScanItems(lib.id, initial, 'scanLibrary:revealInitial');
+    try {
+      const enriched = await ensureEnrichedForInitial(lib, initial.concat());
+      updateScanItems(lib.id, enriched, 'scanLibrary:revealInitial');
+    } catch (e) { updateScanItems(lib.id, initial, 'scanLibrary:revealInitial'); }
   }
   // reveal items now that scan finished
   try { delete libraryMetaRef.current[lib.id].hideWhileScanning; } catch (e) {}
@@ -1830,7 +1861,18 @@ export default function ScanManager({ buttons }: DashboardProps) {
                   for (const k of Object.keys(toMerge)) {
                     try { toApply[k] = (toMerge[k] || []).slice(0, INITIAL_VISIBLE_COUNT); } catch (e) { toApply[k] = []; }
                   }
-                  updateScanItemsMultiple(toApply, 'scanAll:mergeCompletedResults:initialSlices');
+                  try {
+                    const enrichedMap: Record<string, any[]> = {};
+                    for (const k of Object.keys(toApply)) {
+                      try {
+                        const libObj = libraries.find((l: any) => l.id === k) as any;
+                        enrichedMap[k] = await ensureEnrichedForInitial(libObj || { id: k }, toApply[k] || []);
+                      } catch (e) { enrichedMap[k] = (toApply[k] || []).slice(0, INITIAL_VISIBLE_COUNT); }
+                    }
+                    updateScanItemsMultiple(enrichedMap, 'scanAll:mergeCompletedResults:initialSlices');
+                  } catch (e) {
+                    updateScanItemsMultiple(toApply, 'scanAll:mergeCompletedResults:initialSlices');
+                  }
                 }
                 // leave completedScanResultsRef populated so appendVisibleItems can pull more on demand
                 // but clear hideWhileScanning metadata
