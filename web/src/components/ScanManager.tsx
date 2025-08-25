@@ -98,6 +98,18 @@ export default function ScanManager({ buttons }: DashboardProps) {
         const initial = items.slice(0, INITIAL_VISIBLE_COUNT);
         setScanItems(s => ({ ...s, [libId]: initial }));
       } else {
+        // Dev-only: emit a stack trace when a large update is applied while a
+        // global scan is running to help locate remaining callers. Controlled
+        // by window.__DEV_SCAN_TRACE (boolean).
+        try {
+          const devTrace = Boolean((window as any).__DEV_SCAN_TRACE);
+          if (devTrace && Array.isArray(items) && items.length > INITIAL_VISIBLE_COUNT && scanningAllRef.current) {
+            // eslint-disable-next-line no-console
+            console.warn('[ScanManager][DEV TRACE] applying large update during scanningAll', { libId, count: items.length, reason });
+            // eslint-disable-next-line no-console
+            console.trace();
+          }
+        } catch (e) {}
         setScanItems(s => ({ ...s, [libId]: items }));
       }
     } catch (e) {}
@@ -120,6 +132,25 @@ export default function ScanManager({ buttons }: DashboardProps) {
           }
         } catch (e) { toApply[k] = map[k]; }
       }
+      // Dev-only: if enabled, print a stack trace when any large per-lib update
+      // is about to be applied while scanningAll so we can trace callers.
+      try {
+        const devTrace = Boolean((window as any).__DEV_SCAN_TRACE);
+        if (devTrace && scanningAllRef.current) {
+          for (const kk of Object.keys(toApply || {})) {
+            try {
+              const arr = toApply[kk] || [];
+              if (Array.isArray(arr) && arr.length > INITIAL_VISIBLE_COUNT) {
+                // eslint-disable-next-line no-console
+                console.warn('[ScanManager][DEV TRACE] bulk apply while scanningAll', { libId: kk, count: arr.length, reason });
+                // eslint-disable-next-line no-console
+                console.trace();
+                break;
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
       setScanItems(s => ({ ...s, ...toApply }));
     } catch (e) {}
   }, []);
@@ -131,19 +162,55 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const VISIBLE_BATCH_SIZE = 6; // how many to append per subsequent batch
   const appendInProgressRef = useRef<Record<string, boolean>>({});
   const userScrolledRef = useRef<Record<string, boolean>>({});
+  const appendCursorRef = useRef<Record<string, number>>({});
+  // stronger dedupe: track an in-flight append promise per-lib and last request time
+  const appendPromiseRef = useRef<Record<string, Promise<void> | undefined>>({});
+  const appendRequestedAtRef = useRef<Record<string, number>>({});
   const appendVisibleItems = useCallback(async (libId: string) => {
     try {
-      const full = completedScanResultsRef.current[libId];
-      if (!Array.isArray(full) || full.length === 0) return;
-      // current visible items
-      const cur = (scanItemsRef.current || {})[libId] || [];
-      if (cur.length >= full.length) return; // nothing to do
-      if (appendInProgressRef.current[libId]) return;
-      appendInProgressRef.current[libId] = true;
-      const next = full.slice(cur.length, cur.length + VISIBLE_BATCH_SIZE);
-      const merged = [...cur, ...next];
-      updateScanItems(libId, merged, 'appendVisibleItems:batch');
-      appendInProgressRef.current[libId] = false;
+    const full = completedScanResultsRef.current[libId];
+    if (!Array.isArray(full) || full.length === 0) return;
+    // If an append is already in-flight for this lib, skip (strong dedupe)
+    if (appendPromiseRef.current[libId]) {
+      // quick debug to help trace repeated calls
+      // eslint-disable-next-line no-console
+      console.debug('[ScanManager] appendVisibleItems: skip, already in-flight', libId);
+      return;
+    }
+    // Throttle frequent requests from onItemsRendered
+    const now = Date.now();
+    const lastReq = appendRequestedAtRef.current[libId] || 0;
+    const APPEND_MIN_INTERVAL_MS = 250; // debounce multiple render callbacks
+    if (now - lastReq < APPEND_MIN_INTERVAL_MS) {
+      // eslint-disable-next-line no-console
+      console.debug('[ScanManager] appendVisibleItems: skip, throttled', libId, now - lastReq);
+      return;
+    }
+    appendRequestedAtRef.current[libId] = now;
+
+    // Reserve an in-flight promise to prevent duplicates
+    const p = (async () => {
+      try {
+        // use an append cursor to avoid overlapping slices when state isn't updated yet
+        if (appendInProgressRef.current[libId]) return;
+        appendInProgressRef.current[libId] = true;
+        const cur = (scanItemsRef.current || {})[libId] || [];
+        const cursor = appendCursorRef.current[libId] ?? cur.length;
+        if (cursor >= full.length) { appendInProgressRef.current[libId] = false; return; }
+        const next = full.slice(cursor, cursor + VISIBLE_BATCH_SIZE);
+        if (!next.length) { appendInProgressRef.current[libId] = false; return; }
+        // advance cursor immediately to reserve these items
+        appendCursorRef.current[libId] = cursor + next.length;
+        const merged = [...cur, ...next];
+        updateScanItems(libId, merged, 'appendVisibleItems:batch');
+        // wait a short tick for scanItemsRef to be updated via the effect
+        await new Promise(r => setTimeout(r, 40));
+      } finally {
+        try { appendInProgressRef.current[libId] = false; } catch (e) {}
+      }
+    })();
+    appendPromiseRef.current[libId] = p;
+    try { await p; } finally { delete appendPromiseRef.current[libId]; }
     } catch (e) { try { appendInProgressRef.current[libId] = false; } catch (er) {} }
   }, [updateScanItems]);
 
@@ -1701,7 +1768,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
               virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
             }
             const vstate = virtualListStateRef.current[vsKey];
-            const ITEM_DEFAULT_HEIGHT = 320; // larger row so three fit in the library area
+            const ITEM_DEFAULT_HEIGHT = 320; // row height adjusted to fit more items comfortably
             const getSize = (index: number) => vstate.sizeMap[index] || ITEM_DEFAULT_HEIGHT;
             const setSize = (index: number, size: number) => {
               try {
@@ -1772,17 +1839,17 @@ export default function ScanManager({ buttons }: DashboardProps) {
                       <div className="font-mono break-all">{item.path}</div>
                     ) : (
                       <div className="flex items-center gap-3">
-                        <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
+                        <div className="text-3xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
                         <div className="flex-1">
-                          <div className="font-mono break-all text-lg">{item.path}</div>
-                          <div className="text-base text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
+                          <div className="font-mono break-all text-xl">{item.path}</div>
+                          <div className="text-lg text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
                         </div>
-                        <div className="flex items-center gap-3">
-                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => rescanItem(lib, item)}>🔄</button>
-                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => autoPreview(lib, item)}>🤖</button>
-                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => searchTVDBFor(item)}>🔍</button>
-                          <input className="input text-base" style={{ width: 150 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
-                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => approveItem(lib, item)}>✅</button>
+                        <div className="flex items-center gap-4">
+                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => rescanItem(lib, item)}>🔄</button>
+                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => autoPreview(lib, item)}>🤖</button>
+                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => searchTVDBFor(item)}>🔍</button>
+                          <input className="input text-lg" style={{ width: 220 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
+                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => approveItem(lib, item)}>✅</button>
                         </div>
                       </div>
                     )}
