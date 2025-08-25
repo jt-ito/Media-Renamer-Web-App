@@ -1055,6 +1055,14 @@ export default function ScanManager({ buttons }: DashboardProps) {
             if (!libraryMetaRef.current[lib.id] || !libraryMetaRef.current[lib.id].bgRunning) break;
             const p = (async () => {
               try {
+                // avoid re-fetching titles for items that have already been scanned
+                try {
+                  const path = it?.path ? normalizePath(it.path) : null;
+                  if (path && (scannedPathsRef.current.has(path) || (scannedUpdatesRef.current && scannedUpdatesRef.current.has(path)))) {
+                    // already scanned — skip external lookup
+                    return;
+                  }
+                } catch (e) {}
                 await fetchEpisodeTitleIfNeededClient(lib, it, { silent: true });
               } catch (e) {}
               // update progress
@@ -1768,7 +1776,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
               virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
             }
             const vstate = virtualListStateRef.current[vsKey];
-            const ITEM_DEFAULT_HEIGHT = 320; // row height adjusted to fit more items comfortably
+            const ITEM_DEFAULT_HEIGHT = 428; // increased size (~1.33x) per user request
             const getSize = (index: number) => vstate.sizeMap[index] || ITEM_DEFAULT_HEIGHT;
             const setSize = (index: number, size: number) => {
               try {
