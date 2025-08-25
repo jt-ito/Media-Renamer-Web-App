@@ -128,7 +128,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   useEffect(() => { scanningAllRef.current = scanningAll; }, [scanningAll]);
   // incremental reveal settings: show a small initial slice after a full scan
   const INITIAL_VISIBLE_COUNT = 12; // number of items to show immediately when a scan completes
-  const VISIBLE_BATCH_SIZE = 50; // how many to append per subsequent batch
+  const VISIBLE_BATCH_SIZE = 6; // how many to append per subsequent batch
   const appendInProgressRef = useRef<Record<string, boolean>>({});
   const appendVisibleItems = useCallback(async (libId: string) => {
     try {
@@ -860,7 +860,12 @@ export default function ScanManager({ buttons }: DashboardProps) {
                           const progIncomplete = prog && (typeof prog.total === 'number') && (prog.done < prog.total);
                           if (!(scanningAll || meta.hideWhileScanning || meta.bgRunning || progIncomplete)) {
                             const windowItems = cur.concat(items).slice(0, INITIAL_WINDOW);
-                            updateScanItems(libId, windowItems, 'idlePrefetch:window');
+                            // Only merge into UI when the user has the panel open; otherwise stash silently
+                            if (openLibPanels[libId]) {
+                              updateScanItems(libId, windowItems, 'idlePrefetch:window');
+                            } else {
+                              try { completedScanResultsRef.current[libId] = (completedScanResultsRef.current[libId] || []).concat(items); } catch (e) {}
+                            }
                           }
                         } catch (e) {}
                         // enqueue silent scans for the returned items
@@ -910,12 +915,13 @@ export default function ScanManager({ buttons }: DashboardProps) {
     return () => { stopped = true; clearInterval(int); };
   }, []);
 
-  async function scanLibrary(lib: Library) {
+  async function scanLibrary(lib: Library, opts?: { revealOnComplete?: boolean }) {
+  const revealRequested = !!(opts && opts.revealOnComplete);
   setScanningLib(lib.id);
   setScanningMap(m => ({ ...m, [lib.id]: true }));
-  // hide items until scan completes
-  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: true, scannedComplete: false };
-  updateScanItems(lib.id, [], 'scanLibrary:start:clearItems');
+  // mark scanning state; only hide/clear UI when this was a user-requested reveal
+  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), hideWhileScanning: revealRequested, scannedComplete: false };
+  if (revealRequested || openLibPanels[lib.id]) updateScanItems(lib.id, [], 'scanLibrary:start:clearItems');
     setScanOffset(0);
     setScanLoading(true);
     try {
@@ -1002,7 +1008,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   completedScanResultsRef.current[lib.id] = accumulatedItems;
   // mark metadata
   libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), scanFinished: true, scannedComplete: true };
-  if (!scanningAll) {
+  if (!scanningAll && (revealRequested || openLibPanels[lib.id])) {
     // reveal a small initial window immediately, keep the rest stashed for append-on-scroll
     const initial = Array.isArray(accumulatedItems) ? accumulatedItems.slice(0, INITIAL_VISIBLE_COUNT) : [];
     updateScanItems(lib.id, initial, 'scanLibrary:revealInitial');
@@ -1601,7 +1607,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
             <div className="text-xs text-muted break-all">{(lib as any).inputRoot || (lib as any).path || (lib as any).libraryPath}</div>
           </div>
           <div>
-            <button className={buttons.base} onClick={() => scanLibrary(lib)} disabled={!!scanningMap[lib.id]}>Scan</button>
+            <button className={buttons.base} onClick={() => scanLibrary(lib, { revealOnComplete: true })} disabled={!!scanningMap[lib.id]}>Scan</button>
             {/* Show scanning overlay/progress when a full scan is running */}
             {scanProgress[lib.id] && (
               (() => {
@@ -1663,7 +1669,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
               virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
             }
             const vstate = virtualListStateRef.current[vsKey];
-            const getSize = (index: number) => vstate.sizeMap[index] || 120;
+            const ITEM_DEFAULT_HEIGHT = 320; // larger row so three fit in the library area
+            const getSize = (index: number) => vstate.sizeMap[index] || ITEM_DEFAULT_HEIGHT;
             const setSize = (index: number, size: number) => {
               try {
                 // Normalize size to integer and ignore tiny fluctuations
@@ -1733,17 +1740,17 @@ export default function ScanManager({ buttons }: DashboardProps) {
                       <div className="font-mono break-all">{item.path}</div>
                     ) : (
                       <div className="flex items-center gap-3">
-                        <div className="text-xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
+                        <div className="text-2xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
                         <div className="flex-1">
-                          <div className="font-mono break-all">{item.path}</div>
-                          <div className="text-sm text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
+                          <div className="font-mono break-all text-lg">{item.path}</div>
+                          <div className="text-base text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <button className={buttons.base} onClick={() => rescanItem(lib, item)}>🔄</button>
-                          <button className={buttons.base} onClick={() => autoPreview(lib, item)}>🤖</button>
-                          <button className={buttons.base} onClick={() => searchTVDBFor(item)}>🔍</button>
-                          <input className="input text-sm" style={{ width: 110 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
-                          <button className={buttons.base} onClick={() => approveItem(lib, item)}>✅</button>
+                        <div className="flex items-center gap-3">
+                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => rescanItem(lib, item)}>🔄</button>
+                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => autoPreview(lib, item)}>🤖</button>
+                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => searchTVDBFor(item)}>🔍</button>
+                          <input className="input text-base" style={{ width: 150 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
+                          <button className={buttons.base + ' px-3 py-2 text-base'} onClick={() => approveItem(lib, item)}>✅</button>
                         </div>
                       </div>
                     )}
@@ -1755,7 +1762,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
             return (
               <List
                 ref={(vstate.listRef as any)}
-                height={Math.min(1200, itemCount * 120)}
+                height={Math.min(1200, itemCount * ITEM_DEFAULT_HEIGHT, 3 * ITEM_DEFAULT_HEIGHT)}
                 itemCount={itemCount}
                 itemSize={getSize}
                 width={'100%'}
@@ -1767,7 +1774,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
                     const full = completedScanResultsRef.current[libId];
                     if (!full || !full.length) return;
                     const cur = (scanItemsRef.current || {})[libId] || [];
-                    if (visibleStopIndex >= (cur.length - 1) - Math.floor(VISIBLE_BATCH_SIZE / 2)) {
+                    // trigger when the user scrolls within 5 items of the current end
+                    if (visibleStopIndex >= (cur.length - 1) - 5) {
                       void appendVisibleItems(libId);
                     }
                   } catch (e) {}
