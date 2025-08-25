@@ -57,7 +57,8 @@ async function registerWeb(app: FastifyInstance) {
 }
 
 async function bootstrap() {
-  const app = Fastify({ logger: false });
+  // Allow larger scan-cache uploads; default Fastify bodyLimit is 1MB.
+  const app = Fastify({ logger: false, bodyLimit: 10 * 1024 * 1024 });
 
   // Normalize year inputs (string/number) into a safe number or undefined
   function parseYear(y: any): number | undefined {
@@ -983,62 +984,90 @@ async function bootstrap() {
   });
 
   // POST merges incoming scanned items into existing cache (by normalized path)
+  // This handler uses async file I/O and serializes writes to avoid blocking the
+  // event loop and to prevent concurrent sync writes which can cause connection
+  // resets under load.
+  let _scanCacheWriteLock: Promise<void> = Promise.resolve();
+  const MAX_POST_BYTES = 50 * 1024 * 1024; // 50MB hard limit to be safe
+
   app.post('/api/scan-cache', async (req, reply) => {
     try {
+      // quick defensive check for huge uploads
+      const clen = Number(req.headers['content-length'] || 0);
+      if (clen && clen > MAX_POST_BYTES) return reply.status(413).send({ error: 'Payload too large' });
+
       const incoming: any = req.body || {};
-      fs.mkdirSync(path.dirname(SCAN_CACHE_PATH), { recursive: true });
-      let existing: Record<string, any> = {};
-      try {
-        if (fs.existsSync(SCAN_CACHE_PATH)) {
-          const raw = fs.readFileSync(SCAN_CACHE_PATH, 'utf8') || '{}';
-          existing = JSON.parse(raw) || {};
-        }
-      } catch (e) { existing = {}; }
+      await fs.promises.mkdir(path.dirname(SCAN_CACHE_PATH), { recursive: true });
 
-  const normalize = (p: string) => normalizePathForCache(String(p || ''));
+      // use a serializing lock so multiple client POSTs don't concurrently
+      // read/merge/write and race or cause excessive sync I/O.
+      const work = async () => {
+        let existing: Record<string, any> = {};
+        try {
+          if (fs.existsSync(SCAN_CACHE_PATH)) {
+            const raw = await fs.promises.readFile(SCAN_CACHE_PATH, 'utf8') || '{}';
+            existing = JSON.parse(raw) || {};
+          }
+        } catch (e) { existing = {}; }
 
-      // If incoming is a map of libId->items (most common), merge per-library
-      for (const libId of Object.keys(incoming || {})) {
-        const arr = incoming[libId];
-        if (!Array.isArray(arr)) continue;
-        existing[libId] = existing[libId] || [];
-        const byPath = new Map<string, any>();
-        for (const it of existing[libId]) {
-          try { byPath.set(normalize(it.path), it); } catch (e) {}
-        }
-        for (const it of arr) {
-          try {
-            const np = normalize(it.path);
-            byPath.set(np, it);
-          } catch (e) {}
-        }
-        existing[libId] = Array.from(byPath.values());
-      }
+        const normalize = (p: string) => normalizePathForCache(String(p || ''));
 
-      // Also accept a flat map of path->item (e.g., scannedUpdates) and merge
-      if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
-        // check if keys look like normalized paths (contain / or \)
-        const keys = Object.keys(incoming);
-        const looksLikePathMap = keys.length && keys.every(k => typeof k === 'string' && (k.indexOf('/') !== -1 || k.indexOf('\\') !== -1));
-        if (looksLikePathMap) {
-          // merge each item into its declared lib if present, otherwise into '__unassigned'
-          for (const k of keys) {
+        // If incoming is a map of libId->items (most common), merge per-library
+        for (const libId of Object.keys(incoming || {})) {
+          const arr = incoming[libId];
+          if (!Array.isArray(arr)) continue;
+          existing[libId] = existing[libId] || [];
+          const byPath = new Map<string, any>();
+          for (const it of existing[libId]) {
+            try { byPath.set(normalize(it.path), it); } catch (e) {}
+          }
+          for (const it of arr) {
             try {
-              const it = incoming[k];
-              const np = normalize(k);
-              const libId = String(it?.libraryId || it?.libId || it?.library || '__unassigned');
-              existing[libId] = existing[libId] || [];
-              const idx = existing[libId].findIndex((x:any) => normalize(x.path) === np);
-              if (idx >= 0) existing[libId][idx] = it;
-              else existing[libId].push(it);
+              const np = normalize(it.path);
+              byPath.set(np, it);
             } catch (e) {}
           }
+          existing[libId] = Array.from(byPath.values());
         }
-      }
 
-      fs.writeFileSync(SCAN_CACHE_PATH, JSON.stringify(existing || {}, null, 2), 'utf8');
+        // Also accept a flat map of path->item (e.g., scannedUpdates) and merge
+        if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
+          const keys = Object.keys(incoming);
+          const looksLikePathMap = keys.length && keys.every(k => typeof k === 'string' && (k.indexOf('/') !== -1 || k.indexOf('\\') !== -1));
+          if (looksLikePathMap) {
+            for (const k of keys) {
+              try {
+                const it = incoming[k];
+                const np = normalize(k);
+                const libId = String(it?.libraryId || it?.libId || it?.library || '__unassigned');
+                existing[libId] = existing[libId] || [];
+                const idx = existing[libId].findIndex((x:any) => normalize(x.path) === np);
+                if (idx >= 0) existing[libId][idx] = it;
+                else existing[libId].push(it);
+              } catch (e) {}
+            }
+          }
+        }
+
+        // atomic write: write to temp then rename
+        const tmp = SCAN_CACHE_PATH + '.tmp.' + crypto.randomBytes(6).toString('hex');
+        try {
+          await fs.promises.writeFile(tmp, JSON.stringify(existing || {}, null, 2), 'utf8');
+          await fs.promises.rename(tmp, SCAN_CACHE_PATH);
+        } catch (e) {
+          // best-effort cleanup
+          try { if (fs.existsSync(tmp)) await fs.promises.unlink(tmp); } catch (e2) {}
+          throw e;
+        }
+      };
+
+      // enqueue the work on the serial lock and wait for it to finish
+      _scanCacheWriteLock = _scanCacheWriteLock.then(work, work);
+      await _scanCacheWriteLock;
+
       return reply.send({ ok: true });
     } catch (e: any) {
+      app.log?.error?.(`scan-cache POST failed: ${String(e?.message || e)}`);
       return reply.status(500).send({ error: String(e?.message || e) });
     }
   });
