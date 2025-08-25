@@ -28,6 +28,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const [hydratedMap, setHydratedMap] = useState<Record<string, boolean>>({});
   const hydratedMapRef = useRef(hydratedMap);
   const [tvdbInputs, setTvdbInputs] = useState<Record<string, { id?: number | string; type: 'movie'|'series' }>>({});
+  const tvdbInputsRef = useRef(tvdbInputs);
   const [rescaningMap, setRescaningMap] = useState<Record<string, boolean>>({});
   const [applying, setApplying] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
@@ -271,6 +272,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
   useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
+  useEffect(() => { tvdbInputsRef.current = tvdbInputs; }, [tvdbInputs]);
   useEffect(() => { loadResponseCacheFromStorage(); }, [loadResponseCacheFromStorage]);
 
   // Restore persisted scan state when Dashboard mounts so results survive navigation
@@ -310,6 +312,32 @@ export default function ScanManager({ buttons }: DashboardProps) {
         if (parsed4 && typeof parsed4 === 'object') libraryMetaRef.current = parsed4;
       }
     } catch (e) {}
+    // Restore hydrated map and tvdb inputs so UI returns to the same hydrated state
+    try {
+      const rawH = sessionStorage.getItem('dashboard.hydratedMap');
+      if (rawH) {
+        const parsedH = JSON.parse(rawH) as Record<string, boolean>;
+        if (parsedH && typeof parsedH === 'object') {
+          setHydratedMap(parsedH);
+          try { hydratedMapRef.current = parsedH; } catch (e) {}
+        }
+      }
+    } catch (e) {}
+    try {
+      const rawTv = sessionStorage.getItem('dashboard.tvdbInputs');
+      if (rawTv) {
+        const parsedTv = JSON.parse(rawTv) as Record<string, { id?: number | string; type?: string }>;
+        if (parsedTv && typeof parsedTv === 'object') {
+          // normalize types
+          const norm: Record<string, { id?: number | string; type: 'movie'|'series' }> = {};
+          for (const k of Object.keys(parsedTv)) {
+            try { norm[k] = { id: parsedTv[k]?.id, type: (parsedTv[k]?.type === 'movie' ? 'movie' : 'series') }; } catch (e) {}
+          }
+          setTvdbInputs(norm);
+          try { tvdbInputsRef.current = norm; } catch (e) {}
+        }
+      }
+    } catch (e) {}
   }, []);
 
   // ...existing code...
@@ -323,6 +351,9 @@ export default function ScanManager({ buttons }: DashboardProps) {
       try { sessionStorage.setItem('dashboard.scannedUpdates', JSON.stringify(Object.fromEntries(Array.from(scannedUpdatesRef.current.entries())))); } catch {}
       try { sessionStorage.setItem('dashboard.scannedPaths', JSON.stringify(Array.from(scannedPathsRef.current || []))); } catch {}
       try { sessionStorage.setItem('dashboard.libraryMeta', JSON.stringify(libraryMetaRef.current || {})); } catch {}
+  // persist hydrated map and tvdb inputs so UI restores quickly on navigation
+  try { sessionStorage.setItem('dashboard.hydratedMap', JSON.stringify(hydratedMapRef.current || {})); } catch {}
+  try { sessionStorage.setItem('dashboard.tvdbInputs', JSON.stringify(tvdbInputsRef.current || {})); } catch {}
     } catch (e) {}
   }, []);
 
