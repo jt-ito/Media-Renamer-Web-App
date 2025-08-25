@@ -65,6 +65,31 @@ export default function ScanManager({ buttons }: DashboardProps) {
   // short-lived in-memory response cache to avoid repeated requests across quick navigations
   const responseCacheRef = useRef(new Map<string, { ts: number; value: any }>());
   const RESPONSE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+  // Persist response cache to sessionStorage so episode-title lookups survive reloads
+  const RESPONSE_CACHE_KEY = 'dashboard.responseCache';
+  const loadResponseCacheFromStorage = useCallback(() => {
+    try {
+      const raw = sessionStorage.getItem(RESPONSE_CACHE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, { ts: number; value: any }>;
+      if (parsed && typeof parsed === 'object') {
+        const m = new Map<string, { ts: number; value: any }>();
+        for (const k of Object.keys(parsed)) {
+          try { m.set(k, parsed[k]); } catch (e) {}
+        }
+        responseCacheRef.current = m;
+      }
+    } catch (e) {}
+  }, []);
+  const persistResponseCacheToStorage = useCallback(() => {
+    try {
+      const obj: Record<string, any> = {};
+      for (const [k, v] of Array.from(responseCacheRef.current.entries())) {
+        try { obj[k] = v; } catch (e) {}
+      }
+      sessionStorage.setItem(RESPONSE_CACHE_KEY, JSON.stringify(obj));
+    } catch (e) {}
+  }, []);
   // keep track of which items are currently visible in the viewport
   const visibleSetRef = useRef(new Set<string>());
   // pending updates for items that were fetched while visible — apply when they leave view
@@ -246,6 +271,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
   useEffect(() => { scanItemsRef.current = scanItems; }, [scanItems]);
   useEffect(() => { hydratedMapRef.current = hydratedMap; }, [hydratedMap]);
+  useEffect(() => { loadResponseCacheFromStorage(); }, [loadResponseCacheFromStorage]);
 
   // Restore persisted scan state when Dashboard mounts so results survive navigation
   useEffect(() => {
@@ -1324,11 +1350,11 @@ export default function ScanManager({ buttons }: DashboardProps) {
           });
           w.postMessage({ requestId, type: 'fetchEpisodeTitle', lib, item });
           const res = await p.catch((e) => { debug('worker failed', e); return null; });
-          if (res && res.inferred) {
+            if (res && res.inferred) {
             // worker returned updatedItem
             ej = { title: res.inferred?.episode_title || null, _workerUpdatedItem: res };
             // cache raw worker response shape for dedupe key (store minimal)
-            try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: { title: ej.title } }); } catch(e){}
+            try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: { title: ej.title } }); persistResponseCacheToStorage(); } catch(e){}
           }
         } catch (e) {
           debug('worker offload error', e);
@@ -1358,7 +1384,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
             if (!eres.ok) return null;
             const r = await eres.json();
             // cache response
-            try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: r }); } catch (e) {}
+            try { responseCacheRef.current.set(dedupeKey, { ts: Date.now(), value: r }); persistResponseCacheToStorage(); } catch (e) {}
             return r;
           })();
           inflightRequestsRef.current.set(dedupeKey, promise);
