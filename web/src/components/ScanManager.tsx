@@ -717,22 +717,36 @@ export default function ScanManager({ buttons }: DashboardProps) {
   }, []);
 
   // Persist scanItems to sessionStorage so navigating away (to Settings) doesn't lose results
+  // Debounce longer and avoid sending very large payloads to the server which may reset connections.
+  const scanCachePostingRef = useRef(false);
   useEffect(() => {
-    // Debounced persistence to server and sessionStorage. Cancels/restarts
-    // when scanItems changes rapidly to avoid network storms.
     let cancelled = false;
     const id = setTimeout(() => {
       (async () => {
         try {
-          await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scanItems || {}) });
-        } catch (e) {
-          // ignore transient network errors; sessionStorage still writes below
-        }
+          const raw = JSON.stringify(scanItems || {});
+          const size = new Blob([raw]).size;
+          // If payload too large, avoid POSTing to server to reduce chance of net reset; persist to sessionStorage instead
+          const MAX_POST_BYTES = 1_000_000; // ~1 MB
+          if (size <= MAX_POST_BYTES && !scanCachePostingRef.current) {
+            try {
+              scanCachePostingRef.current = true;
+              await fetch('/api/scan-cache', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: raw });
+            } catch (e) {
+              // ignore transient network errors
+            } finally {
+              scanCachePostingRef.current = false;
+            }
+          } else {
+            // record that we skipped posting because payload was large
+            try { sessionStorage.setItem('dashboard.scanCacheSkipped', JSON.stringify({ ts: Date.now(), size })); } catch (e) {}
+          }
+        } catch (e) {}
         try {
           sessionStorage.setItem('dashboard.scanItems', JSON.stringify(scanItems || {}));
         } catch (e) { /* ignore */ }
       })();
-    }, 500);
+    }, 2000);
     return () => { cancelled = true; clearTimeout(id); };
   }, [scanItems]);
 
@@ -1822,7 +1836,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
               virtualListStateRef.current[vsKey] = { sizeMap: {}, listRef: { current: null } } as any;
             }
             const vstate = virtualListStateRef.current[vsKey];
-            const ITEM_DEFAULT_HEIGHT = 428; // increased size (~1.33x) per user request
+            const ITEM_DEFAULT_HEIGHT = 285; // reduced to ~2/3 of previous so boxes shrink by ~1/3
             const getSize = (index: number) => vstate.sizeMap[index] || ITEM_DEFAULT_HEIGHT;
             const setSize = (index: number, size: number) => {
               try {
@@ -1896,14 +1910,14 @@ export default function ScanManager({ buttons }: DashboardProps) {
                         <div className="text-3xl">{(tvdbInputs[item.id]?.type || item.inferred?.kind) === 'movie' ? '🎬' : '📺'}</div>
                         <div className="flex-1">
                           <div className="font-mono break-all text-xl">{item.path}</div>
-                          <div className="text-lg text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
+                          <div className="text-xl text-muted">{item.inferred?.parsedName || item.inferred?.title || ''}</div>
                         </div>
                         <div className="flex items-center gap-4">
-                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => rescanItem(lib, item)}>🔄</button>
-                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => autoPreview(lib, item)}>🤖</button>
-                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => searchTVDBFor(item)}>🔍</button>
-                          <input className="input text-lg" style={{ width: 220 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
-                          <button className={buttons.base + ' px-4 py-3 text-lg'} onClick={() => approveItem(lib, item)}>✅</button>
+                          <button className={buttons.base + ' px-5 py-3 text-xl'} onClick={() => rescanItem(lib, item)}>🔄</button>
+                          <button className={buttons.base + ' px-5 py-3 text-xl'} onClick={() => autoPreview(lib, item)}>🤖</button>
+                          <button className={buttons.base + ' px-5 py-3 text-xl'} onClick={() => searchTVDBFor(item)}>🔍</button>
+                          <input className="input text-xl" style={{ width: 220 }} placeholder="TVDB" value={tvdbInputs[item.id]?.id ?? ''} onChange={e => setTvdbInputs(m => ({ ...m, [item.id]: { ...(m[item.id]||{type: item.inferred?.kind||'series'}), id: e.target.value } }))} />
+                          <button className={buttons.base + ' px-5 py-3 text-xl'} onClick={() => approveItem(lib, item)}>✅</button>
                         </div>
                       </div>
                     )}
