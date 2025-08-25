@@ -86,8 +86,17 @@ export default function ScanManager({ buttons }: DashboardProps) {
       console.debug(`[ScanManager] setScanItems lib=${libId} count=${count} reason=${reason} time=${new Date().toISOString()}`);
     } catch (e) {}
     try {
+      // Safety guard: avoid setting very large arrays into UI state unless this
+      // library has completed scanning or this update is an explicit append.
+      const meta = libraryMetaRef.current[libId] || {} as any;
+      const isAppend = String(reason || '').startsWith('append') || String(reason || '').includes('appendVisible');
       if (items == null) {
         setScanItems(s => { const c = { ...s }; delete c[libId]; return c; });
+      } else if (Array.isArray(items) && items.length > INITIAL_VISIBLE_COUNT && !isAppend && !meta.scannedComplete && scanningAllRef.current) {
+        // stash full results and apply only initial slice to avoid large UI updates
+        try { completedScanResultsRef.current[libId] = items; } catch (e) {}
+        const initial = items.slice(0, INITIAL_VISIBLE_COUNT);
+        setScanItems(s => ({ ...s, [libId]: initial }));
       } else {
         setScanItems(s => ({ ...s, [libId]: items }));
       }
@@ -95,8 +104,28 @@ export default function ScanManager({ buttons }: DashboardProps) {
   }, []);
   const updateScanItemsMultiple = useCallback((map: Record<string, any[]>, reason: string) => {
     try { console.debug(`[ScanManager] setScanItems multiple keys=${Object.keys(map).length} reason=${reason} time=${new Date().toISOString()}`); } catch (e) {}
-    try { setScanItems(s => ({ ...s, ...map })); } catch (e) {}
+    try {
+      // For each lib, apply same safety guard as single updater
+      const toApply: Record<string, any[]> = {};
+      for (const k of Object.keys(map || {})) {
+        try {
+          const items = map[k] || [];
+          const meta = libraryMetaRef.current[k] || {} as any;
+          const isAppend = String(reason || '').startsWith('append') || String(reason || '').includes('appendVisible');
+          if (Array.isArray(items) && items.length > INITIAL_VISIBLE_COUNT && !isAppend && !meta.scannedComplete && scanningAllRef.current) {
+            try { completedScanResultsRef.current[k] = items; } catch (e) {}
+            toApply[k] = items.slice(0, INITIAL_VISIBLE_COUNT);
+          } else {
+            toApply[k] = items;
+          }
+        } catch (e) { toApply[k] = map[k]; }
+      }
+      setScanItems(s => ({ ...s, ...toApply }));
+    } catch (e) {}
   }, []);
+  // keep a ref of scanningAll so callbacks can read the latest value
+  const scanningAllRef = useRef(scanningAll);
+  useEffect(() => { scanningAllRef.current = scanningAll; }, [scanningAll]);
   // incremental reveal settings: show a small initial slice after a full scan
   const INITIAL_VISIBLE_COUNT = 12; // number of items to show immediately when a scan completes
   const VISIBLE_BATCH_SIZE = 50; // how many to append per subsequent batch
