@@ -97,6 +97,25 @@ export default function ScanManager({ buttons }: DashboardProps) {
     try { console.debug(`[ScanManager] setScanItems multiple keys=${Object.keys(map).length} reason=${reason} time=${new Date().toISOString()}`); } catch (e) {}
     try { setScanItems(s => ({ ...s, ...map })); } catch (e) {}
   }, []);
+  // incremental reveal settings: show a small initial slice after a full scan
+  const INITIAL_VISIBLE_COUNT = 12; // number of items to show immediately when a scan completes
+  const VISIBLE_BATCH_SIZE = 50; // how many to append per subsequent batch
+  const appendInProgressRef = useRef<Record<string, boolean>>({});
+  const appendVisibleItems = useCallback(async (libId: string) => {
+    try {
+      const full = completedScanResultsRef.current[libId];
+      if (!Array.isArray(full) || full.length === 0) return;
+      // current visible items
+      const cur = (scanItemsRef.current || {})[libId] || [];
+      if (cur.length >= full.length) return; // nothing to do
+      if (appendInProgressRef.current[libId]) return;
+      appendInProgressRef.current[libId] = true;
+      const next = full.slice(cur.length, cur.length + VISIBLE_BATCH_SIZE);
+      const merged = [...cur, ...next];
+      updateScanItems(libId, merged, 'appendVisibleItems:batch');
+      appendInProgressRef.current[libId] = false;
+    } catch (e) { try { appendInProgressRef.current[libId] = false; } catch (er) {} }
+  }, [updateScanItems]);
   // delay between queued fetches to keep within API limits (ms)
   const RATE_DELAY_MS = 1500; // ~40 requests/min
   const IDLE_THRESHOLD_MS = 60_000; // start idle scan after 60s of inactivity
@@ -507,7 +526,14 @@ export default function ScanManager({ buttons }: DashboardProps) {
             const rawScan = sessionStorage.getItem('dashboard.scanItems');
             if (rawScan) {
               const parsed = JSON.parse(rawScan) as Record<string, any[]>;
-              setScanItems(parsed || {});
+              // Reveal only small initial slices to avoid showing partial large scans
+              const toApply: Record<string, any[]> = {};
+              if (parsed && typeof parsed === 'object') {
+                for (const k of Object.keys(parsed)) {
+                  try { toApply[k] = (parsed[k] || []).slice(0, INITIAL_VISIBLE_COUNT); } catch (e) { toApply[k] = []; }
+                }
+              }
+              setScanItems(toApply);
             }
           } catch {}
         }
@@ -517,7 +543,13 @@ export default function ScanManager({ buttons }: DashboardProps) {
           const rawScan = sessionStorage.getItem('dashboard.scanItems');
           if (rawScan) {
             const parsed = JSON.parse(rawScan) as Record<string, any[]>;
-            setScanItems(parsed || {});
+            const toApply: Record<string, any[]> = {};
+            if (parsed && typeof parsed === 'object') {
+              for (const k of Object.keys(parsed)) {
+                try { toApply[k] = (parsed[k] || []).slice(0, INITIAL_VISIBLE_COUNT); } catch (e) { toApply[k] = []; }
+              }
+            }
+            setScanItems(toApply);
           }
         } catch {}
       }
@@ -937,12 +969,14 @@ export default function ScanManager({ buttons }: DashboardProps) {
   try { persistScanItemsNow(lib.id, accumulatedItems); } catch (e) {}
   // If a global "scan all" is in progress, stash results and avoid revealing per-library
   // partials until the whole operation finishes.
-  if (scanningAll) {
-    completedScanResultsRef.current[lib.id] = accumulatedItems;
-    libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), scanFinished: true, scannedComplete: true };
-  } else {
-    updateScanItems(lib.id, accumulatedItems, 'scanLibrary:complete');
-    libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), scanFinished: true, scannedComplete: true };
+  // stash the full results so we can append them incrementally
+  completedScanResultsRef.current[lib.id] = accumulatedItems;
+  // mark metadata
+  libraryMetaRef.current[lib.id] = { ...(libraryMetaRef.current[lib.id] || {}), scanFinished: true, scannedComplete: true };
+  if (!scanningAll) {
+    // reveal a small initial window immediately, keep the rest stashed for append-on-scroll
+    const initial = Array.isArray(accumulatedItems) ? accumulatedItems.slice(0, INITIAL_VISIBLE_COUNT) : [];
+    updateScanItems(lib.id, initial, 'scanLibrary:revealInitial');
   }
   // reveal items now that scan finished
   try { delete libraryMetaRef.current[lib.id].hideWhileScanning; } catch (e) {}
@@ -1690,7 +1724,25 @@ export default function ScanManager({ buttons }: DashboardProps) {
             };
 
             return (
-              <List ref={(vstate.listRef as any)} height={Math.min(1200, itemCount * 120)} itemCount={itemCount} itemSize={getSize} width={'100%'}>
+              <List
+                ref={(vstate.listRef as any)}
+                height={Math.min(1200, itemCount * 120)}
+                itemCount={itemCount}
+                itemSize={getSize}
+                width={'100%'}
+                onItemsRendered={({ visibleStopIndex }) => {
+                  try {
+                    // If completed results exist for this lib and the visibleStopIndex
+                    // is near the end of currently visible items, append the next batch.
+                    const libId = lib.id;
+                    const full = completedScanResultsRef.current[libId];
+                    if (!full || !full.length) return;
+                    const cur = (scanItemsRef.current || {})[libId] || [];
+                    if (visibleStopIndex >= (cur.length - 1) - Math.floor(VISIBLE_BATCH_SIZE / 2)) {
+                      void appendVisibleItems(libId);
+                    }
+                  } catch (e) {}
+                }}>
                 {Row}
               </List>
             );
@@ -1736,10 +1788,16 @@ export default function ScanManager({ buttons }: DashboardProps) {
               try {
                 const toMerge = completedScanResultsRef.current || {};
                 if (Object.keys(toMerge).length) {
-                  updateScanItemsMultiple(toMerge, 'scanAll:mergeCompletedResults');
+                  // reveal only an initial slice for each library to avoid huge bulk updates
+                  const toApply: Record<string, any[]> = {};
+                  for (const k of Object.keys(toMerge)) {
+                    try { toApply[k] = (toMerge[k] || []).slice(0, INITIAL_VISIBLE_COUNT); } catch (e) { toApply[k] = []; }
+                  }
+                  updateScanItemsMultiple(toApply, 'scanAll:mergeCompletedResults:initialSlices');
                 }
-                // clear stash and reset hideWhileScanning metadata
-                completedScanResultsRef.current = {};
+                // leave completedScanResultsRef populated so appendVisibleItems can pull more on demand
+                // but clear hideWhileScanning metadata
+                // completedScanResultsRef.current = {};
                 for (const lib of libraries) {
                   try { if (libraryMetaRef.current[lib.id]) delete libraryMetaRef.current[lib.id].hideWhileScanning; } catch (e) {}
                 }
