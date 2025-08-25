@@ -109,7 +109,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   const updateScanItems = useCallback((libId: string, items: any[] | null, reason: string) => {
     try {
       const count = Array.isArray(items) ? items.length : 0;
-      console.debug(`[ScanManager] setScanItems lib=${libId} count=${count} reason=${reason} time=${new Date().toISOString()}`);
+      debug(`[ScanManager] setScanItems lib=${libId} count=${count} reason=${reason} time=${new Date().toISOString()}`);
     } catch (e) {}
     try {
       // Safety guard: avoid setting very large arrays into UI state unless this
@@ -130,10 +130,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
         try {
           const devTrace = Boolean((window as any).__DEV_SCAN_TRACE);
           if (devTrace && Array.isArray(items) && items.length > INITIAL_VISIBLE_COUNT && scanningAllRef.current) {
-            // eslint-disable-next-line no-console
-            console.warn('[ScanManager][DEV TRACE] applying large update during scanningAll', { libId, count: items.length, reason });
-            // eslint-disable-next-line no-console
-            console.trace();
+            debug('[ScanManager][DEV TRACE] applying large update during scanningAll', { libId, count: items.length, reason });
+            try { if ((window as any).__DEV_SCAN_TRACE) console.trace(); } catch (e) {}
           }
         } catch (e) {}
         setScanItems(s => ({ ...s, [libId]: items }));
@@ -141,7 +139,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
     } catch (e) {}
   }, []);
   const updateScanItemsMultiple = useCallback((map: Record<string, any[]>, reason: string) => {
-    try { console.debug(`[ScanManager] setScanItems multiple keys=${Object.keys(map).length} reason=${reason} time=${new Date().toISOString()}`); } catch (e) {}
+    try { debug(`[ScanManager] setScanItems multiple keys=${Object.keys(map).length} reason=${reason} time=${new Date().toISOString()}`); } catch (e) {}
     try {
       // For each lib, apply same safety guard as single updater
       const toApply: Record<string, any[]> = {};
@@ -167,10 +165,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
             try {
               const arr = toApply[kk] || [];
               if (Array.isArray(arr) && arr.length > INITIAL_VISIBLE_COUNT) {
-                // eslint-disable-next-line no-console
-                console.warn('[ScanManager][DEV TRACE] bulk apply while scanningAll', { libId: kk, count: arr.length, reason });
-                // eslint-disable-next-line no-console
-                console.trace();
+                debug('[ScanManager][DEV TRACE] bulk apply while scanningAll', { libId: kk, count: arr.length, reason });
+                try { if ((window as any).__DEV_SCAN_TRACE) console.trace(); } catch (e) {}
                 break;
               }
             } catch (e) {}
@@ -192,6 +188,10 @@ export default function ScanManager({ buttons }: DashboardProps) {
   // stronger dedupe: track an in-flight append promise per-lib and last request time
   const appendPromiseRef = useRef<Record<string, Promise<void> | undefined>>({});
   const appendRequestedAtRef = useRef<Record<string, number>>({});
+  // Track the last time we revealed the initial window for a library so
+  // we can suppress duplicate/automatic scans that start immediately after
+  // a reveal (causing an unnecessary full rescan).
+  const lastRevealAtRef = useRef<Record<string, number>>({});
   const appendVisibleItems = useCallback(async (libId: string) => {
     try {
     const full = completedScanResultsRef.current[libId];
@@ -199,8 +199,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
     // If an append is already in-flight for this lib, skip (strong dedupe)
     if (appendPromiseRef.current[libId]) {
       // quick debug to help trace repeated calls
-      // eslint-disable-next-line no-console
-      console.debug('[ScanManager] appendVisibleItems: skip, already in-flight', libId);
+      debug('[ScanManager] appendVisibleItems: skip, already in-flight', libId);
       return;
     }
     // Throttle frequent requests from onItemsRendered
@@ -208,8 +207,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
     const lastReq = appendRequestedAtRef.current[libId] || 0;
     const APPEND_MIN_INTERVAL_MS = 250; // debounce multiple render callbacks
     if (now - lastReq < APPEND_MIN_INTERVAL_MS) {
-      // eslint-disable-next-line no-console
-      console.debug('[ScanManager] appendVisibleItems: skip, throttled', libId, now - lastReq);
+      debug('[ScanManager] appendVisibleItems: skip, throttled', libId, now - lastReq);
       return;
     }
     appendRequestedAtRef.current[libId] = now;
@@ -339,8 +337,6 @@ export default function ScanManager({ buttons }: DashboardProps) {
       }
     } catch (e) {}
   }, []);
-
-  // ...existing code...
 
   // Persist helpers: throttle writes to sessionStorage to avoid thrash
   const persistScanState = useCallback((libId?: string) => {
@@ -825,7 +821,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
         }
       } catch (e) {
         // best-effort
-        console.debug('applyWindowPreview failed', e);
+        debug('applyWindowPreview failed', e);
       }
     };
 
@@ -1084,6 +1080,17 @@ export default function ScanManager({ buttons }: DashboardProps) {
 
   async function scanLibrary(lib: Library, opts?: { revealOnComplete?: boolean }) {
   const revealRequested = !!(opts && opts.revealOnComplete);
+  // If we just revealed this library's initial slice, suppress any
+  // automatic re-scan that starts within a short window unless this is
+  // an explicit user-requested reveal (revealRequested === true).
+  try {
+    const last = lastRevealAtRef.current[lib.id] || 0;
+    const RECENT_REVEAL_SUPPRESS_MS = 5000; // 5s grace window
+    if (!revealRequested && last && (Date.now() - last) < RECENT_REVEAL_SUPPRESS_MS) {
+      try { debug('[ScanManager] scanLibrary: suppressed duplicate scan after recent reveal', lib.id); } catch (e) {}
+      return;
+    }
+  } catch (e) {}
   setScanningLib(lib.id);
   setScanningMap(m => ({ ...m, [lib.id]: true }));
   // mark scanning state; only hide/clear UI when this was a user-requested reveal
@@ -1148,8 +1155,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
                   try {
                     const cached = responseCacheRef.current.get(dedupeKeyLocal);
                     if (cached && (Date.now() - (cached.ts || 0)) < RESPONSE_CACHE_TTL_MS) {
-                      // eslint-disable-next-line no-console
-                      console.debug('[ScanManager] processPage: skipping enrichment; cache hit', dedupeKeyLocal);
+                      debug('[ScanManager] processPage: skipping enrichment; cache hit', dedupeKeyLocal);
                       return;
                     }
                   } catch (e) {}
@@ -1209,6 +1215,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
     try {
       const enriched = await ensureEnrichedForInitial(lib, initial.concat());
       updateScanItems(lib.id, enriched, 'scanLibrary:revealInitial');
+  try { lastRevealAtRef.current[lib.id] = Date.now(); } catch (e) {}
     } catch (e) { updateScanItems(lib.id, initial, 'scanLibrary:revealInitial'); }
   }
   // reveal items now that scan finished
@@ -1316,7 +1323,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   }
 
   async function searchTVDBFor(item: any) {
-  console.debug('searchTVDBFor called', item?.id || item?.path);
+  debug('searchTVDBFor called', item?.id || item?.path);
     const key = item.id;
     // allow the server to decide whether a TVDB key is configured
     setSearchResults(r => ({ ...r, [key]: [{ loading: true }] }));
@@ -1346,7 +1353,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   }
 
   async function rescanItem(lib: Library, item: any) {
-  console.debug('rescanItem called', lib.id, item.id);
+  debug('rescanItem called', lib.id, item.id);
     const key = item.id;
     setRescaningMap(m => ({ ...m, [key]: true }));
     try {
@@ -1365,7 +1372,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
       try {
         await autoPreview(lib, { ...item, inferred });
       } catch (e) {
-        console.debug('autoPreview after rescan failed', e);
+        debug('autoPreview after rescan failed', e);
       }
     } catch (e: any) {
       setError(e?.message ?? 'Rescan failed');
@@ -1628,7 +1635,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
         const plan = (js.plans && js.plans[0]) || null;
         const key = item.id;
         if (plan && plan.meta && plan.meta.tvdbId) {
-          setTvdbInputs(m => ({ ...m, [key]: { ...(m[key]||{}), id: plan.meta.tvdbId, type: plan.meta.type || type } }));
+          setTvdbInputs(m => ({ ...m, [key]: { ...(m[key]||{}), id: plan.meta.tvdbId, type: plan.meta.type || 'series' } }));
         }
       } catch {}
     } catch (e: any) {
@@ -1637,7 +1644,7 @@ export default function ScanManager({ buttons }: DashboardProps) {
   }
 
   async function autoPreview(lib: Library, item: any) {
-  console.debug('autoPreview called', lib.id, item.id);
+  debug('autoPreview called', lib.id, item.id);
     try {
       const res = await fetch('/api/auto-preview', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ libraryId: lib.id, item })
