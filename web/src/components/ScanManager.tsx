@@ -1774,8 +1774,8 @@ export default function ScanManager({ buttons }: DashboardProps) {
                     const full = completedScanResultsRef.current[libId];
                     if (!full || !full.length) return;
                     const cur = (scanItemsRef.current || {})[libId] || [];
-                    // trigger when the user scrolls within 5 items of the current end
-                    if (visibleStopIndex >= (cur.length - 1) - 5) {
+                    // trigger when the user scrolls past 5 items from the end of current visible list
+                    if (visibleStopIndex >= (cur.length - 5)) {
                       void appendVisibleItems(libId);
                     }
                   } catch (e) {}
